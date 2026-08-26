@@ -42,6 +42,8 @@ export default {
     const images = Array.isArray(body.images) ? body.images.slice(0, 15) : []; // cap pages to keep payload sane
     const subject = body.subject || 'المادة';
     const count = Math.min(Math.max(parseInt(body.count) || 10, 1), 25);
+    const mode = body.mode === 'summary' ? 'summary' : 'quiz';
+    const difficulty = ['easy', 'medium', 'hard'].includes(body.difficulty) ? body.difficulty : 'medium';
 
     if (!lectureText && !images.length) {
       return new Response(JSON.stringify({ error: 'text or images required' }), {
@@ -51,17 +53,38 @@ export default {
     }
 
     // Guard against absurdly long input (keeps well within free-tier token budget).
-    const trimmedText = lectureText.slice(0, 40000);
+    // Summaries may combine several lectures, so they get a bigger budget than a single quiz.
+    const maxChars = mode === 'summary' ? 90000 : 40000;
+    const trimmedText = lectureText.slice(0, maxChars);
 
-    const instructions =
-      'You are an exam-question generator for a university lecture. ' +
-      'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-      'JSON shape: {"questions":[{"type":"mcq","question":"...","options":["A","B","C","D"],"correct_index":0,"explanation":"..."}]}. ' +
-      'Mix mcq and short_answer types (short_answer omits options/correct_index and instead has "model_answer"). ' +
-      'Base every question strictly on the given lecture content. Write questions in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
-      `Subject: ${subject}\n` +
-      `Generate exactly ${count} exam questions` +
-      (images.length ? ' from these scanned lecture pages (read the text in the images):' : ` from this lecture content:\n\n${trimmedText}`);
+    const difficultyNote = {
+      easy: 'Keep questions at an easy, definition/recall level — direct facts stated in the material.',
+      medium: 'Keep questions at a medium level — require understanding and applying a concept, not just recall.',
+      hard: 'Keep questions hard — require analysis, comparing concepts, or multi-step reasoning across the material.',
+    }[difficulty];
+
+    let instructions;
+    if (mode === 'summary') {
+      instructions =
+        'You are summarizing university lecture material for a student to revise from. ' +
+        'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+        'JSON shape: {"overview":"2-3 sentence overview","key_points":["point 1","point 2", ...],"terms":[{"term":"...","meaning":"..."}]}. ' +
+        'Write in Arabic if the content is in Arabic, otherwise match the source language. Be concrete and specific to the given content, not generic.\n\n' +
+        `Subject: ${subject}\n` +
+        'Summarize the following lecture content' +
+        (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+    } else {
+      instructions =
+        'You are an exam-question generator for a university lecture. ' +
+        'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+        'JSON shape: {"questions":[{"type":"mcq","question":"...","options":["A","B","C","D"],"correct_index":0,"explanation":"..."}]}. ' +
+        'Mix mcq and short_answer types (short_answer omits options/correct_index and instead has "model_answer"). ' +
+        difficultyNote + ' ' +
+        'Base every question strictly on the given lecture content. Write questions in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
+        `Subject: ${subject}\n` +
+        `Generate exactly ${count} exam questions` +
+        (images.length ? ' from these scanned lecture pages (read the text in the images):' : ` from this lecture content:\n\n${trimmedText}`);
+    }
 
     const parts = [{ text: instructions }];
     if (images.length) {
