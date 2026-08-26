@@ -39,11 +39,12 @@ export default {
     }
 
     const lectureText = (body.text || '').trim();
+    const images = Array.isArray(body.images) ? body.images.slice(0, 15) : []; // cap pages to keep payload sane
     const subject = body.subject || 'المادة';
     const count = Math.min(Math.max(parseInt(body.count) || 10, 1), 25);
 
-    if (!lectureText) {
-      return new Response(JSON.stringify({ error: 'text is required' }), {
+    if (!lectureText && !images.length) {
+      return new Response(JSON.stringify({ error: 'text or images required' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json', ...corsHeaders() },
       });
@@ -52,14 +53,24 @@ export default {
     // Guard against absurdly long input (keeps well within free-tier token budget).
     const trimmedText = lectureText.slice(0, 40000);
 
-    const prompt =
+    const instructions =
       'You are an exam-question generator for a university lecture. ' +
       'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
       'JSON shape: {"questions":[{"type":"mcq","question":"...","options":["A","B","C","D"],"correct_index":0,"explanation":"..."}]}. ' +
       'Mix mcq and short_answer types (short_answer omits options/correct_index and instead has "model_answer"). ' +
-      'Base every question strictly on the given lecture text. Write questions in Arabic if the lecture text is in Arabic, otherwise match the source language.\n\n' +
+      'Base every question strictly on the given lecture content. Write questions in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
       `Subject: ${subject}\n` +
-      `Generate exactly ${count} exam questions from this lecture content:\n\n${trimmedText}`;
+      `Generate exactly ${count} exam questions` +
+      (images.length ? ' from these scanned lecture pages (read the text in the images):' : ` from this lecture content:\n\n${trimmedText}`);
+
+    const parts = [{ text: instructions }];
+    if (images.length) {
+      for (const img of images) {
+        if (img && img.data) {
+          parts.push({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data } });
+        }
+      }
+    }
 
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -70,7 +81,7 @@ export default {
           'x-goog-api-key': env.GEMINI_API_KEY,
         },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          contents: [{ role: 'user', parts: parts }],
           generationConfig: {
             responseMimeType: 'application/json',
           },
