@@ -1,14 +1,17 @@
-// Cloudflare Worker: generates a quiz from lecture text using the Gemini API
-// (free tier — no permanent cost, generous daily limits).
+// Cloudflare Worker: quiz / summary / flashcards / Q&A generator for lectures,
+// using the free Gemini API, with KV caching and simple score tracking.
 //
 // SETUP:
-// 1. Get a free key at https://aistudio.google.com/apikey (Google account, no card).
-// 2. wrangler secret put GEMINI_API_KEY   -> paste that key
+// 1. Get a free Gemini key at https://aistudio.google.com/apikey
+//    Settings -> Variables and Secrets -> add GEMINI_API_KEY (type: Secret)
+// 2. Create a KV namespace (Storage & Databases -> KV -> Create, name it
+//    anything e.g. "quiz-kv"), then bind it to this Worker:
+//    Settings -> Bindings -> Add -> KV Namespace -> variable name: QUIZ_KV
 // 3. Change ALLOWED_ORIGIN below to your app's real domain before going live.
-// 4. wrangler deploy
 
 const ALLOWED_ORIGIN = '*'; // TODO: replace with e.g. 'https://yourapp.pages.dev'
-const GEMINI_MODEL = 'gemini-2.5-flash'; // free tier, ~1500 requests/day
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
 function corsHeaders() {
   return {
@@ -18,134 +21,170 @@ function corsHeaders() {
   };
 }
 
+function jsonResponse(obj, status) {
+  return new Response(JSON.stringify(obj), {
+    status: status || 200,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+  });
+}
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function slug(s) {
+  return (s || '').toString().trim().toLowerCase().replace(/\s+/g, '_').slice(0, 80);
+}
+
+async function callGemini(env, parts) {
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const apiResponse = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts }],
+      generationConfig: { responseMimeType: 'application/json' },
+    }),
+  });
+
+  if (!apiResponse.ok) {
+    const errText = await apiResponse.text();
+    const err = new Error('Gemini API error: ' + errText);
+    err.status = apiResponse.status;
+    throw err;
+  }
+
+  const data = await apiResponse.json();
+  const rawText = (data.candidates && data.candidates[0] &&
+    data.candidates[0].content && data.candidates[0].content.parts &&
+    data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
+  const cleaned = rawText.replace(/```json|```/g, '').trim();
+  return JSON.parse(cleaned); // let caller catch parse errors
+}
+
 export default {
   async fetch(request, env) {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders() });
-    }
-
-    if (request.method !== 'POST') {
-      return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
-    }
+    if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
+    if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
 
     let body;
+    try { body = await request.json(); }
+    catch (e) { return jsonResponse({ error: 'invalid JSON body' }, 400); }
+
+    const mode = body.mode || 'quiz';
+
     try {
-      body = await request.json();
-    } catch (e) {
-      return new Response(JSON.stringify({ error: 'invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-      });
-    }
+      // ---- score tracking (no AI call, no cache) ----
+      if (mode === 'save_score') {
+        const student = slug(body.student);
+        if (!student) return jsonResponse({ error: 'student name required' }, 400);
+        const key = 'scores:' + student;
+        const existingRaw = await env.QUIZ_KV.get(key);
+        const list = existingRaw ? JSON.parse(existingRaw) : [];
+        list.push({
+          subject: body.subject || '',
+          lecture: body.lecture || '',
+          score: Number(body.score) || 0,
+          total: Number(body.total) || 0,
+          difficulty: body.difficulty || '',
+          at: Date.now(),
+        });
+        await env.QUIZ_KV.put(key, JSON.stringify(list.slice(-100))); // keep last 100
+        return jsonResponse({ ok: true });
+      }
 
-    const lectureText = (body.text || '').trim();
-    const images = Array.isArray(body.images) ? body.images.slice(0, 15) : []; // cap pages to keep payload sane
-    const subject = body.subject || 'المادة';
-    const count = Math.min(Math.max(parseInt(body.count) || 10, 1), 25);
-    const mode = body.mode === 'summary' ? 'summary' : 'quiz';
-    const difficulty = ['easy', 'medium', 'hard'].includes(body.difficulty) ? body.difficulty : 'medium';
+      if (mode === 'get_scores') {
+        const student = slug(body.student);
+        if (!student) return jsonResponse({ error: 'student name required' }, 400);
+        const raw = await env.QUIZ_KV.get('scores:' + student);
+        return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
+      }
 
-    if (!lectureText && !images.length) {
-      return new Response(JSON.stringify({ error: 'text or images required' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-      });
-    }
+      // ---- AI-backed modes below ----
+      const lectureText = (body.text || '').trim();
+      const images = Array.isArray(body.images) ? body.images.slice(0, 15) : [];
+      const subject = body.subject || 'المادة';
+      const count = Math.min(Math.max(parseInt(body.count) || 10, 1), 25);
+      const difficulty = ['easy', 'medium', 'hard'].includes(body.difficulty) ? body.difficulty : 'medium';
+      const question = (body.question || '').trim();
 
-    // Guard against absurdly long input (keeps well within free-tier token budget).
-    // Summaries may combine several lectures, so they get a bigger budget than a single quiz.
-    const maxChars = mode === 'summary' ? 90000 : 40000;
-    const trimmedText = lectureText.slice(0, maxChars);
+      if (!lectureText && !images.length) {
+        return jsonResponse({ error: 'text or images required' }, 400);
+      }
 
-    const difficultyNote = {
-      easy: 'Keep questions at an easy, definition/recall level — direct facts stated in the material.',
-      medium: 'Keep questions at a medium level — require understanding and applying a concept, not just recall.',
-      hard: 'Keep questions hard — require analysis, comparing concepts, or multi-step reasoning across the material.',
-    }[difficulty];
+      const maxChars = mode === 'summary' ? 90000 : 40000;
+      const trimmedText = lectureText.slice(0, maxChars);
 
-    let instructions;
-    if (mode === 'summary') {
-      instructions =
-        'You are summarizing university lecture material for a student to revise from. ' +
-        'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-        'JSON shape: {"overview":"2-3 sentence overview","key_points":["point 1","point 2", ...],"terms":[{"term":"...","meaning":"..."}]}. ' +
-        'Write in Arabic if the content is in Arabic, otherwise match the source language. Be concrete and specific to the given content, not generic.\n\n' +
-        `Subject: ${subject}\n` +
-        'Summarize the following lecture content' +
-        (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
-    } else {
-      instructions =
-        'You are an exam-question generator for a university lecture. ' +
-        'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-        'JSON shape: {"questions":[{"type":"mcq","question":"...","options":["A","B","C","D"],"correct_index":0,"explanation":"..."}]}. ' +
-        'Mix mcq and short_answer types (short_answer omits options/correct_index and instead has "model_answer"). ' +
-        difficultyNote + ' ' +
-        'Base every question strictly on the given lecture content. Write questions in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
-        `Subject: ${subject}\n` +
-        `Generate exactly ${count} exam questions` +
-        (images.length ? ' from these scanned lecture pages (read the text in the images):' : ` from this lecture content:\n\n${trimmedText}`);
-    }
+      // Cache key: based on content + mode + params. Skip caching for 'ask' (unique per question).
+      let cacheKey = null;
+      if (mode !== 'ask' && env.QUIZ_KV) {
+        const fingerprint = (trimmedText || '') + '|' + images.map((i) => (i.data || '').slice(0, 200)).join(',') +
+          '|' + mode + '|' + difficulty + '|' + count + '|' + subject;
+        cacheKey = 'cache:' + (await sha256Hex(fingerprint));
+        const cached = await env.QUIZ_KV.get(cacheKey);
+        if (cached) return jsonResponse(JSON.parse(cached));
+      }
 
-    const parts = [{ text: instructions }];
-    if (images.length) {
+      const difficultyNote = {
+        easy: 'Keep questions at an easy, definition/recall level — direct facts stated in the material.',
+        medium: 'Keep questions at a medium level — require understanding and applying a concept, not just recall.',
+        hard: 'Keep questions hard — require analysis, comparing concepts, or multi-step reasoning across the material.',
+      }[difficulty];
+
+      let instructions;
+      if (mode === 'summary') {
+        instructions =
+          'You are summarizing university lecture material for a student to revise from. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+          'JSON shape: {"overview":"2-3 sentence overview","key_points":["point 1", ...],"terms":[{"term":"...","meaning":"..."}]}. ' +
+          'Write in Arabic if the content is in Arabic, otherwise match the source language. Be concrete, not generic.\n\n' +
+          `Subject: ${subject}\nSummarize the following lecture content` +
+          (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+      } else if (mode === 'flashcards') {
+        instructions =
+          'You are creating spaced-repetition flashcards from university lecture material. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+          'JSON shape: {"cards":[{"front":"short question or term","back":"concise answer/definition"}]}. ' +
+          'Write in Arabic if the content is in Arabic, otherwise match the source language. Keep each card short and focused on ONE fact.\n\n' +
+          `Subject: ${subject}\nGenerate exactly ${count} flashcards from this lecture content` +
+          (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+      } else if (mode === 'ask') {
+        if (!question) return jsonResponse({ error: 'question is required for ask mode' }, 400);
+        instructions =
+          'You are a helpful teaching assistant answering a student question strictly using the given lecture content. ' +
+          'If the answer is not in the content, say so honestly instead of guessing. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"answer":"..."}. ' +
+          'Answer in Arabic if the question is in Arabic, otherwise match the question language.\n\n' +
+          `Subject: ${subject}\nStudent question: ${question}\n\nLecture content` +
+          (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+      } else {
+        instructions =
+          'You are an exam-question generator for a university lecture. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+          'JSON shape: {"questions":[{"type":"mcq","question":"...","options":["A","B","C","D"],"correct_index":0,"explanation":"..."}]}. ' +
+          'Mix mcq and short_answer types (short_answer omits options/correct_index and instead has "model_answer"). ' +
+          difficultyNote + ' ' +
+          'Base every question strictly on the given lecture content. Write questions in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
+          `Subject: ${subject}\nGenerate exactly ${count} exam questions` +
+          (images.length ? ' from these scanned lecture pages (read the text in the images):' : ` from this lecture content:\n\n${trimmedText}`);
+      }
+
+      const parts = [{ text: instructions }];
       for (const img of images) {
-        if (img && img.data) {
-          parts.push({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data } });
-        }
-      }
-    }
-
-    try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-      const apiResponse = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': env.GEMINI_API_KEY,
-        },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: parts }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-          },
-        }),
-      });
-
-      if (!apiResponse.ok) {
-        const errText = await apiResponse.text();
-        return new Response(JSON.stringify({ error: 'Gemini API error', detail: errText }), {
-          status: 502,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-        });
+        if (img && img.data) parts.push({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data } });
       }
 
-      const data = await apiResponse.json();
-      const rawText = (data.candidates && data.candidates[0] &&
-        data.candidates[0].content && data.candidates[0].content.parts &&
-        data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
+      const result = await callGemini(env, parts);
 
-      // responseMimeType:json should guarantee clean JSON, but strip fences defensively.
-      const cleaned = rawText.replace(/```json|```/g, '').trim();
-
-      let quiz;
-      try {
-        quiz = JSON.parse(cleaned);
-      } catch (e) {
-        return new Response(JSON.stringify({ error: 'model did not return valid JSON', raw: rawText }), {
-          status: 502,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-        });
+      if (cacheKey && env.QUIZ_KV) {
+        await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
       }
 
-      return new Response(JSON.stringify(quiz), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-      });
+      return jsonResponse(result);
     } catch (e) {
-      return new Response(JSON.stringify({ error: 'worker error', detail: String(e) }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-      });
+      const status = e && e.status === 429 ? 429 : 502;
+      return jsonResponse({ error: e && e.message ? e.message : String(e) }, status);
     }
   },
 };
-
