@@ -9,7 +9,7 @@
 //    Settings -> Bindings -> Add -> KV Namespace -> variable name: QUIZ_KV
 // 3. Change ALLOWED_ORIGIN below to your app's real domain before going live.
 
-const ALLOWED_ORIGIN = '*'; // TODO: replace with e.g. 'https://yourapp.pages.dev'
+const ALLOWED_ORIGIN = 'https://justm.site';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
