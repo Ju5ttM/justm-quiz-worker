@@ -37,6 +37,40 @@ function slug(s) {
   return (s || '').toString().trim().toLowerCase().replace(/\s+/g, '_').slice(0, 80);
 }
 
+// Simple per-IP rate limit backed by KV (approximate — KV reads/writes aren't
+// atomic, so under heavy simultaneous load a few extra requests may slip
+// through, but that's fine for our purpose of stopping one person from
+// burning through the whole day's free Gemini quota alone).
+const RATE_LIMIT_PER_MINUTE = 6;
+const RATE_LIMIT_PER_DAY = 60;
+
+async function checkRateLimit(env, ip) {
+  if (!env.QUIZ_KV || !ip) return null; // fail open if KV or IP unavailable
+
+  const minuteKey = 'rl:min:' + ip;
+  const dayKey = 'rl:day:' + ip;
+
+  const [minuteRaw, dayRaw] = await Promise.all([
+    env.QUIZ_KV.get(minuteKey),
+    env.QUIZ_KV.get(dayKey),
+  ]);
+  const minuteCount = minuteRaw ? parseInt(minuteRaw) : 0;
+  const dayCount = dayRaw ? parseInt(dayRaw) : 0;
+
+  if (minuteCount >= RATE_LIMIT_PER_MINUTE) {
+    return 'كتّرت الطلبات في دقيقة واحدة — استنى دقيقة وجرب تاني.';
+  }
+  if (dayCount >= RATE_LIMIT_PER_DAY) {
+    return 'وصلت للحد الأقصى من طلبات الذكاء الاصطناعي المسموحة لك اليوم — جرب تاني بكرة.';
+  }
+
+  await Promise.all([
+    env.QUIZ_KV.put(minuteKey, String(minuteCount + 1), { expirationTtl: 60 }),
+    env.QUIZ_KV.put(dayKey, String(dayCount + 1), { expirationTtl: 60 * 60 * 24 }),
+  ]);
+  return null; // allowed
+}
+
 async function callGemini(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const apiResponse = await fetch(apiUrl, {
@@ -125,6 +159,12 @@ export default {
         const cached = await env.QUIZ_KV.get(cacheKey);
         if (cached) return jsonResponse(JSON.parse(cached));
       }
+
+      // Only requests that actually need a fresh Gemini call count against the
+      // per-student rate limit — cached results above are free.
+      const ip = request.headers.get('CF-Connecting-IP');
+      const limitMsg = await checkRateLimit(env, ip);
+      if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
       const difficultyNote = {
         easy: 'Keep questions at an easy, definition/recall level — direct facts stated in the material.',
