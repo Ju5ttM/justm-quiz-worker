@@ -137,7 +137,7 @@ export default {
 
       // ---- AI-backed modes below ----
       const lectureText = (body.text || '').trim();
-      const images = Array.isArray(body.images) ? body.images.slice(0, 15) : [];
+      const images = Array.isArray(body.images) ? body.images.slice(0, 25) : [];
       const subject = body.subject || 'المادة';
       const count = Math.min(Math.max(parseInt(body.count) || 10, 1), 25);
       const difficulty = ['easy', 'medium', 'hard'].includes(body.difficulty) ? body.difficulty : 'medium';
