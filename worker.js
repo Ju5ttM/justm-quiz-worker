@@ -135,6 +135,48 @@ export default {
         return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
       }
 
+      // ---- compose_document: turn a student's raw notes into a full,
+      // organized lecture (title + sections), used to export a PDF/Word file ----
+      if (mode === 'compose_document') {
+        const notes = (body.notes || '').trim();
+        if (!notes) return jsonResponse({ error: 'notes are required' }, 400);
+        const subject = body.subject || 'المادة';
+        const requestedTitle = (body.title || '').trim();
+        const trimmedNotes = notes.slice(0, 20000);
+
+        let cacheKey = null;
+        if (env.QUIZ_KV) {
+          const fingerprint = trimmedNotes + '|compose_document|' + subject + '|' + requestedTitle;
+          cacheKey = 'cache:' + (await sha256Hex(fingerprint));
+          const cached = await env.QUIZ_KV.get(cacheKey);
+          if (cached) return jsonResponse(JSON.parse(cached));
+        }
+
+        const ip = request.headers.get('CF-Connecting-IP');
+        const limitMsg = await checkRateLimit(env, ip);
+        if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
+
+        const instructions =
+          "You are a university teaching assistant turning a student's rough bullet-point notes into a clean, well-organized lecture document. " +
+          'Expand each point into clear explanatory text (do not just repeat the bullet as-is), stay accurate to what was given, and do not invent facts the notes do not imply. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+          'JSON shape: {"title":"...","sections":[{"heading":"...","paragraphs":["...","..."],"bullets":["...","..."]}]}. ' +
+          'Each section should use paragraphs or bullets or both, whichever fits the content best. Aim for 3 to 6 sections. ' +
+          "Write in Arabic if the notes are in Arabic, otherwise match the notes' language." +
+          (requestedTitle
+            ? ` Use this as the document title, lightly polished if needed: "${requestedTitle}".`
+            : ' Come up with a clear, specific title yourself.') +
+          `\n\nSubject: ${subject}\nStudent notes:\n\n${trimmedNotes}`;
+
+        const result = await callGemini(env, [{ text: instructions }]);
+
+        if (cacheKey && env.QUIZ_KV) {
+          await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
+        }
+
+        return jsonResponse(result);
+      }
+
       // ---- AI-backed modes below ----
       const lectureText = (body.text || '').trim();
       const images = Array.isArray(body.images) ? body.images.slice(0, 25) : [];
@@ -188,6 +230,17 @@ export default {
           'JSON shape: {"cards":[{"front":"short question or term","back":"concise answer/definition"}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language. Keep each card short and focused on ONE fact.\n\n' +
           `Subject: ${subject}\nGenerate exactly ${count} flashcards from this lecture content` +
+          (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+      } else if (mode === 'video_script') {
+        instructions =
+          'You are turning a university lecture into a narrated slideshow script for a student to watch and listen to. ' +
+          'Break the material into 6 to 10 slides that progress logically through the content (intro/overview slide first, then one concept per slide, short wrap-up slide last). ' +
+          'For each slide: "title" is a short slide heading (max ~6 words), "bullets" are 2-4 short on-screen points (each under ~10 words), ' +
+          'and "narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
+          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"..."}]}. ' +
+          'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
+          `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
       } else if (mode === 'ask') {
         if (!question) return jsonResponse({ error: 'question is required for ask mode' }, 400);
