@@ -135,6 +135,47 @@ export default {
         return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
       }
 
+      // ---- admin: AI usage log + ban list (owner-only UI calls these, but the
+      // worker itself doesn't verify roles - matches this app's existing pattern
+      // of trusting the client for admin-only actions) ----
+      const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+      if (mode === 'get_ai_log') {
+        const raw = await env.QUIZ_KV.get('ai_log');
+        return jsonResponse({ log: raw ? JSON.parse(raw) : [] });
+      }
+
+      if (mode === 'get_banned') {
+        const raw = await env.QUIZ_KV.get('banned_users');
+        return jsonResponse({ banned: raw ? JSON.parse(raw) : [] });
+      }
+
+      if (mode === 'ban_user') {
+        const target = (body.target || '').trim();
+        if (!target) return jsonResponse({ error: 'target required' }, 400);
+        const raw = await env.QUIZ_KV.get('banned_users');
+        const list = raw ? JSON.parse(raw) : [];
+        if (list.indexOf(target) === -1) list.push(target);
+        await env.QUIZ_KV.put('banned_users', JSON.stringify(list));
+        return jsonResponse({ ok: true, banned: list });
+      }
+
+      if (mode === 'unban_user') {
+        const target = (body.target || '').trim();
+        const raw = await env.QUIZ_KV.get('banned_users');
+        const list = (raw ? JSON.parse(raw) : []).filter((t) => t !== target);
+        await env.QUIZ_KV.put('banned_users', JSON.stringify(list));
+        return jsonResponse({ ok: true, banned: list });
+      }
+
+      // Any mode from here on can call Gemini or reflects AI usage - block banned
+      // IPs before doing anything else.
+      const bannedRaw = await env.QUIZ_KV.get('banned_users');
+      const bannedList = bannedRaw ? JSON.parse(bannedRaw) : [];
+      if (bannedList.indexOf(requestIp) !== -1) {
+        return jsonResponse({ error: 'ممنوع استخدام الذكاء الاصطناعي من هذا الجهاز — تواصل مع إدارة المنصة لو ده غلط.' }, 403);
+      }
+
       // ---- compose_document: turn a student's raw notes into a full,
       // organized lecture (title + sections), used to export a PDF/Word file ----
       if (mode === 'compose_document') {
@@ -152,7 +193,7 @@ export default {
           if (cached) return jsonResponse(JSON.parse(cached));
         }
 
-        const ip = request.headers.get('CF-Connecting-IP');
+        const ip = requestIp;
         const limitMsg = await checkRateLimit(env, ip);
         if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
@@ -204,7 +245,7 @@ export default {
 
       // Only requests that actually need a fresh Gemini call count against the
       // per-student rate limit — cached results above are free.
-      const ip = request.headers.get('CF-Connecting-IP');
+      const ip = requestIp;
       const limitMsg = await checkRateLimit(env, ip);
       if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
@@ -248,14 +289,16 @@ export default {
           'You are a patient private tutor chatting with a student about their lecture, like a WhatsApp conversation — NOT writing an article. ' +
           'Use the given lecture content as your source of truth (you may also draw on general subject knowledge to explain better, ' +
           'but stay consistent with what the lecture says). ' +
-          'STRICT rules: ' +
+          'SAFETY CHECK FIRST: if the student\'s message contains insults, profanity, harassment, or abuse (directed at you, the app, staff, or anyone else), ' +
+          'set "flagged" to true and leave "answer" as an empty string — do not engage with or reference the abusive content at all. Otherwise set "flagged" to false. ' +
+          'STRICT rules for non-abusive questions: ' +
           '(1) Default answer length is SHORT — 2 to 5 sentences. If the question is just "what does X mean / define X", give ONLY a short plain-language definition, nothing else — no example unless asked. ' +
           '(2) Only give a worked example if the student is asking about a rule/law/problem they are confused about, or explicitly asks for an example — and even then keep it to ONE compact example, not multiple paragraphs. ' +
           '(3) NEVER use markdown formatting of any kind — no **bold**, no #headers, no bullet asterisks, no numbered-list markers. Plain conversational sentences only, like you are texting a friend. ' +
           '(4) End with a short, casual one-line offer like "قولّي لو عايز مثال" ONLY if you did not already give one — do not pad the answer with this every time. ' +
           '(5) If the student says something like "still don\'t get it" or asks for another example, give ONE different, simpler concrete example — still short. ' +
           'If the lecture genuinely does not cover what they are asking, say so honestly in one line instead of guessing. ' +
-          'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"answer":"..."}. ' +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"flagged":false,"answer":"..."}. ' +
           'Answer in Arabic if the question is in Arabic, otherwise match the question language.\n\n' +
           `Subject: ${subject}\nStudent question: ${question}\n\nLecture content` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
@@ -277,6 +320,30 @@ export default {
       }
 
       const result = await callGemini(env, parts);
+
+      if (mode === 'ask') {
+        const flagged = !!result.flagged;
+        const studentName = (body.student || 'غير معروف').toString().slice(0, 60);
+        if (env.QUIZ_KV) {
+          const rawLog = await env.QUIZ_KV.get('ai_log');
+          const logList = rawLog ? JSON.parse(rawLog) : [];
+          logList.push({
+            at: Date.now(),
+            ip,
+            student: studentName,
+            subject,
+            question,
+            answer: flagged ? '' : (result.answer || ''),
+            flagged,
+          });
+          await env.QUIZ_KV.put('ai_log', JSON.stringify(logList.slice(-300))); // keep last 300
+        }
+        if (flagged) {
+          return jsonResponse({
+            answer: 'ممنوع استخدام ألفاظ أو أسلوب مسيء — الرجاء الالتزام بالأدب. تكرار ده ممكن يؤدي لحظرك من استخدام الذكاء الاصطناعي.',
+          });
+        }
+      }
 
       if (cacheKey && env.QUIZ_KV) {
         await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
