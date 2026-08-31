@@ -319,31 +319,61 @@ export default {
         if (img && img.data) parts.push({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data } });
       }
 
-      const result = await callGemini(env, parts);
-
+      // ---- ask mode gets its own handling: Gemini's own safety filters often
+      // block a response outright when the question itself is abusive, which
+      // would otherwise throw and skip logging/moderation entirely. Treat any
+      // failure here as flagged content rather than a generic technical error. ----
       if (mode === 'ask') {
-        const flagged = !!result.flagged;
         const studentName = (body.student || 'غير معروف').toString().slice(0, 60);
+        let result;
+        let flagged = false;
+        try {
+          result = await callGemini(env, parts);
+          flagged = !!result.flagged;
+        } catch (e) {
+          flagged = true;
+          result = { answer: '' };
+        }
+
         if (env.QUIZ_KV) {
           const rawLog = await env.QUIZ_KV.get('ai_log');
           const logList = rawLog ? JSON.parse(rawLog) : [];
           logList.push({
-            at: Date.now(),
-            ip,
-            student: studentName,
-            subject,
-            question,
-            answer: flagged ? '' : (result.answer || ''),
-            flagged,
+            at: Date.now(), ip, student: studentName, subject, question,
+            answer: flagged ? '' : (result.answer || ''), flagged,
           });
           await env.QUIZ_KV.put('ai_log', JSON.stringify(logList.slice(-300))); // keep last 300
         }
+
         if (flagged) {
+          const AUTO_BAN_AFTER = 2; // flagged messages from the same device before auto-ban
+          let offenseCount = 1;
+          if (env.QUIZ_KV) {
+            const flagKey = 'flag_count:' + ip;
+            const countRaw = await env.QUIZ_KV.get(flagKey);
+            offenseCount = (countRaw ? parseInt(countRaw) : 0) + 1;
+            await env.QUIZ_KV.put(flagKey, String(offenseCount), { expirationTtl: 60 * 60 * 24 }); // offense count resets after a clean day
+          }
+
+          if (offenseCount >= AUTO_BAN_AFTER) {
+            if (env.QUIZ_KV) {
+              const bannedRaw2 = await env.QUIZ_KV.get('banned_users');
+              const bannedList2 = bannedRaw2 ? JSON.parse(bannedRaw2) : [];
+              if (bannedList2.indexOf(ip) === -1) bannedList2.push(ip);
+              await env.QUIZ_KV.put('banned_users', JSON.stringify(bannedList2));
+            }
+            return jsonResponse({ answer: 'تم حظرك تلقائياً من استخدام الذكاء الاصطناعي بسبب تكرار الإساءة.' });
+          }
+
           return jsonResponse({
-            answer: 'ممنوع استخدام ألفاظ أو أسلوب مسيء — الرجاء الالتزام بالأدب. تكرار ده ممكن يؤدي لحظرك من استخدام الذكاء الاصطناعي.',
+            answer: 'ممنوع استخدام ألفاظ أو أسلوب مسيء — الرجاء الالتزام بالأدب. تكرار ده هيؤدي لحظرك تلقائياً من استخدام الذكاء الاصطناعي.',
           });
         }
+
+        return jsonResponse(result);
       }
+
+      const result = await callGemini(env, parts);
 
       if (cacheKey && env.QUIZ_KV) {
         await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
