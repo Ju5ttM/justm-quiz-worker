@@ -277,9 +277,10 @@ export default {
           'You are turning a university lecture into a narrated slideshow script for a student to watch and listen to. ' +
           'Break the material into 6 to 10 slides that progress logically through the content (intro/overview slide first, then one concept per slide, short wrap-up slide last). ' +
           'For each slide: "title" is a short slide heading (max ~6 words), "bullets" are 2-4 short on-screen points (each under ~10 words), ' +
-          'and "narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly. ' +
+          '"narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly, ' +
+          'and "icon" is ONE single emoji that visually represents this slide\'s specific topic (not a generic book/pencil emoji unless nothing else fits - pick something concrete: e.g. 💰 for money/cash concepts, ⚖️ for balance/comparison, 📊 for reports/statistics, 🏦 for banking, 🧾 for invoices/receipts, 🤝 for agreements, ⏰ for timing/periods, 🔄 for cycles/processes, etc). ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"..."}]}. ' +
+          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"...","icon":"..."}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
           `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
