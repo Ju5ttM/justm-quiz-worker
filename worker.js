@@ -279,8 +279,10 @@ export default {
           'For each slide: "title" is a short slide heading (max ~6 words), "bullets" are 2-4 short on-screen points (each under ~10 words), ' +
           '"narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly, ' +
           'and "icon" is ONE single emoji that visually represents this slide\'s specific topic (not a generic book/pencil emoji unless nothing else fits - pick something concrete: e.g. 💰 for money/cash concepts, ⚖️ for balance/comparison, 📊 for reports/statistics, 🏦 for banking, 🧾 for invoices/receipts, 🤝 for agreements, ⏰ for timing/periods, 🔄 for cycles/processes, etc). ' +
+          'Also include "quote": a single punchy one-sentence takeaway for the slide (12-20 words), phrased like a memorable rule or definition a student would want highlighted on screen — NOT a restatement of the title, and NOT identical to any bullet verbatim. ' +
+          'And "keyword": the 2-4 word core phrase copied EXACTLY as it appears inside "quote" (character-for-character substring) that should be visually highlighted — pick the most important term, not a generic word. ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"...","icon":"..."}]}. ' +
+          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"...","icon":"...","quote":"...","keyword":"..."}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
           `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
