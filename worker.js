@@ -13,6 +13,69 @@ const ALLOWED_ORIGIN = 'https://justm.site';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
+// These two identify the Firebase project so this Worker can verify an
+// admin's ID token itself (see verifyOwner below). Neither value is a
+// secret - the Web API key is the same public key already sitting in the
+// site's own client-side firebaseConfig, and the project ID is public too.
+// Only GEMINI_API_KEY (set as a Cloudflare Secret, see SETUP above) is
+// actually sensitive.
+const FIREBASE_PROJECT_ID = 'hissgiza-8fa57';
+const FIREBASE_WEB_API_KEY = 'AIzaSyCfZCyMDkExznG3b3Uo5Xiat746-ksa-Go';
+
+// FIX (was the most serious issue in this file): get_ai_log / get_banned /
+// ban_user / unban_user used to run with NO server-side check at all -
+// anyone who found this Worker's URL could dump the student Q&A log
+// (names + IPs + questions) or ban/unban any IP, entirely bypassing the
+// admin login on the website. This function makes the Worker verify the
+// caller for itself instead of trusting the client:
+//   1) the caller must send "Authorization: Bearer <Firebase ID token>"
+//   2) that token is checked against Firebase Auth itself (accounts:lookup)
+//      to get the real signed-in uid - a forged/expired token fails here
+//   3) that uid's admin_accounts/{uid} doc is read via the Firestore REST
+//      API using the SAME token, so Firestore's own security rules (which
+//      only let a user read their own admin_accounts doc) do the actual
+//      enforcement - this Worker never needs its own service-account key
+//   4) only a doc with role == "owner" is accepted, matching the fact
+//      the admin dashboard already treats this whole section (aiUsageBox)
+//      as owner-only
+async function verifyOwner(request) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const match = authHeader.match(/^Bearer (.+)$/);
+  if (!match) return null;
+  const idToken = match[1];
+
+  let uid;
+  try {
+    const lookupRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${FIREBASE_WEB_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!lookupRes.ok) return null;
+    const lookupData = await lookupRes.json();
+    uid = lookupData.users && lookupData.users[0] && lookupData.users[0].localId;
+  } catch (e) {
+    return null;
+  }
+  if (!uid) return null;
+
+  try {
+    const docRes = await fetch(
+      `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/admin_accounts/${uid}`,
+      { headers: { Authorization: `Bearer ${idToken}` } }
+    );
+    if (!docRes.ok) return null; // not an admin, or token doesn't match this uid's own doc
+    const docData = await docRes.json();
+    const role = docData.fields && docData.fields.role && docData.fields.role.stringValue;
+    return { uid, role: role || 'admin' };
+  } catch (e) {
+    return null;
+  }
+}
+
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
@@ -135,10 +198,19 @@ export default {
         return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
       }
 
-      // ---- admin: AI usage log + ban list (owner-only UI calls these, but the
-      // worker itself doesn't verify roles - matches this app's existing pattern
-      // of trusting the client for admin-only actions) ----
+      // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user'];
+      if (OWNER_ONLY_MODES.includes(mode)) {
+        // FIX: these four used to run with no check at all. Now the Worker
+        // verifies the caller's Firebase ID token itself and requires the
+        // "owner" role, instead of trusting whatever the client sends.
+        const account = await verifyOwner(request);
+        if (!account || account.role !== 'owner') {
+          return jsonResponse({ error: 'unauthorized' }, 403);
+        }
+      }
 
       if (mode === 'get_ai_log') {
         const raw = await env.QUIZ_KV.get('ai_log');
@@ -277,12 +349,9 @@ export default {
           'You are turning a university lecture into a narrated slideshow script for a student to watch and listen to. ' +
           'Break the material into 6 to 10 slides that progress logically through the content (intro/overview slide first, then one concept per slide, short wrap-up slide last). ' +
           'For each slide: "title" is a short slide heading (max ~6 words), "bullets" are 2-4 short on-screen points (each under ~10 words), ' +
-          '"narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly, ' +
-          'and "icon" is ONE single emoji that visually represents this slide\'s specific topic (not a generic book/pencil emoji unless nothing else fits - pick something concrete: e.g. 💰 for money/cash concepts, ⚖️ for balance/comparison, 📊 for reports/statistics, 🏦 for banking, 🧾 for invoices/receipts, 🤝 for agreements, ⏰ for timing/periods, 🔄 for cycles/processes, etc). ' +
-          'Also include "quote": a single punchy one-sentence takeaway for the slide (12-20 words), phrased like a memorable rule or definition a student would want highlighted on screen — NOT a restatement of the title, and NOT identical to any bullet verbatim. ' +
-          'And "keyword": the 2-4 word core phrase copied EXACTLY as it appears inside "quote" (character-for-character substring) that should be visually highlighted — pick the most important term, not a generic word. ' +
+          'and "narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly. ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"...","icon":"...","quote":"...","keyword":"..."}]}. ' +
+          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"..."}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
           `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
