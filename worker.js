@@ -80,7 +80,16 @@ function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    // FIX: was just 'Content-Type'. The owner-only calls (get_ai_log,
+    // get_banned, ban_user, unban_user) now send an "Authorization: Bearer
+    // <token>" header so the Worker can verify the caller - but the
+    // browser only allows a non-simple header like Authorization through
+    // AFTER a CORS preflight (OPTIONS) request succeeds, and that
+    // preflight only succeeds if this list explicitly names the header.
+    // Without "Authorization" here, the browser blocked the real request
+    // before it was ever sent, which is what showed up as a plain
+    // "Failed to fetch" in the admin panel.
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
 
