@@ -81,7 +81,10 @@ function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    // Authorization is needed for the owner-only calls (get_ai_log, get_banned,
+    // ban_user, unban_user): without it the browser's CORS preflight rejects the
+    // request and the site just shows "Failed to fetch".
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
 
