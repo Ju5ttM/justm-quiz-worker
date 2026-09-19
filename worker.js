@@ -14,13 +14,13 @@ const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
 // These two identify the Firebase project so this Worker can verify an
-// admin's ID token itself (see verifyOwner below). Neither value is a
-// secret - the Web API key is the same public key already sitting in the
-// site's own client-side firebaseConfig, and the project ID is public too.
-// Only GEMINI_API_KEY (set as a Cloudflare Secret, see SETUP above) is
-// actually sensitive.
+// admin's ID token itself (see verifyOwner below). The project ID is public.
+// The API key is NOT in this file (this repo is public): it lives in a
+// Cloudflare Secret named FIREBASE_WEB_API_KEY, read as env.FIREBASE_WEB_API_KEY.
+// It is a separate server-side key restricted to the Identity Toolkit API only,
+// not the browser key in the site's firebaseConfig.
+// Settings -> Variables and Secrets -> add FIREBASE_WEB_API_KEY (type: Secret)
 const FIREBASE_PROJECT_ID = 'hissgiza-8fa57';
-const FIREBASE_WEB_API_KEY = 'AIzaSyCfZCyMDkExznG3b3Uo5Xiat746-ksa-Go';
 
 // FIX (was the most serious issue in this file): get_ai_log / get_banned /
 // ban_user / unban_user used to run with NO server-side check at all -
@@ -38,16 +38,17 @@ const FIREBASE_WEB_API_KEY = 'AIzaSyCfZCyMDkExznG3b3Uo5Xiat746-ksa-Go';
 //   4) only a doc with role == "owner" is accepted, matching the fact
 //      the admin dashboard already treats this whole section (aiUsageBox)
 //      as owner-only
-async function verifyOwner(request) {
+async function verifyOwner(request, env) {
   const authHeader = request.headers.get('Authorization') || '';
   const match = authHeader.match(/^Bearer (.+)$/);
   if (!match) return null;
   const idToken = match[1];
+  if (!env || !env.FIREBASE_WEB_API_KEY) return null; // secret not configured -> deny
 
   let uid;
   try {
     const lookupRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${FIREBASE_WEB_API_KEY}`,
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_WEB_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -80,16 +81,7 @@ function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    // FIX: was just 'Content-Type'. The owner-only calls (get_ai_log,
-    // get_banned, ban_user, unban_user) now send an "Authorization: Bearer
-    // <token>" header so the Worker can verify the caller - but the
-    // browser only allows a non-simple header like Authorization through
-    // AFTER a CORS preflight (OPTIONS) request succeeds, and that
-    // preflight only succeeds if this list explicitly names the header.
-    // Without "Authorization" here, the browser blocked the real request
-    // before it was ever sent, which is what showed up as a plain
-    // "Failed to fetch" in the admin panel.
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type',
   };
 }
 
@@ -215,7 +207,7 @@ export default {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
         // "owner" role, instead of trusting whatever the client sends.
-        const account = await verifyOwner(request);
+        const account = await verifyOwner(request, env);
         if (!account || account.role !== 'owner') {
           return jsonResponse({ error: 'unauthorized' }, 403);
         }
