@@ -8,8 +8,15 @@
 //    anything e.g. "quiz-kv"), then bind it to this Worker:
 //    Settings -> Bindings -> Add -> KV Namespace -> variable name: QUIZ_KV
 // 3. Change ALLOWED_ORIGIN below to your app's real domain before going live.
+// 4. In Firebase Console -> Authentication -> Sign-in method, enable the
+//    "Anonymous" provider. The public quiz ("نتايجي") now signs each
+//    visitor's device into Firebase anonymously (see quizAuth in
+//    index.html) so save_score/get_scores can verify a real, unforgeable
+//    per-device identity without requiring any login - if Anonymous sign-in
+//    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
+const BUILD_VERSION = 'v5.5-score-auth';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -72,6 +79,32 @@ async function verifyOwner(request, env) {
     const docData = await docRes.json();
     const role = docData.fields && docData.fields.role && docData.fields.role.stringValue;
     return { uid, role: role || 'admin' };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Verifies that the caller sent a genuine Firebase ID token issued by THIS
+// project - accounts:lookup only succeeds for a real, currently-valid token,
+// so this can't be forged the way a client-supplied name/id string could.
+// Deliberately does NOT require any Firestore doc to exist for the uid:
+// used for the public quiz-scoring endpoints (save_score/get_scores), which
+// run on the no-login public lectures list and must also accept a device's
+// anonymous Firebase identity, not just a real course/admin account.
+async function verifyRealUser(request, env) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const match = authHeader.match(/^Bearer (.+)$/);
+  if (!match || !env || !env.FIREBASE_WEB_API_KEY) return null;
+  const idToken = match[1];
+  try {
+    const lookupRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_WEB_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    if (!lookupRes.ok) return null;
+    const data = await lookupRes.json();
+    const uid = data.users && data.users[0] && data.users[0].localId;
+    return uid ? { uid } : null;
   } catch (e) {
     return null;
   }
@@ -176,30 +209,43 @@ export default {
     const mode = body.mode || 'quiz';
 
     try {
-      // ---- score tracking (no AI call, no cache) ----
-      if (mode === 'save_score') {
-        const student = slug(body.student);
-        if (!student) return jsonResponse({ error: 'student name required' }, 400);
-        const key = 'scores:' + student;
-        const existingRaw = await env.QUIZ_KV.get(key);
-        const list = existingRaw ? JSON.parse(existingRaw) : [];
-        list.push({
-          subject: body.subject || '',
-          lecture: body.lecture || '',
-          score: Number(body.score) || 0,
-          total: Number(body.total) || 0,
-          difficulty: body.difficulty || '',
-          at: Date.now(),
-        });
-        await env.QUIZ_KV.put(key, JSON.stringify(list.slice(-100))); // keep last 100
-        return jsonResponse({ ok: true });
-      }
+      // ---- score tracking: authenticated course users only ----
+      // Never trust a client-supplied student name as the identity. Scores are
+      // now keyed by the verified Firebase UID, so one student cannot request
+      // another student's history by changing {student: ...}.
+      if (mode === 'save_score' || mode === 'get_scores') {
+        const account = await verifyRealUser(request, env);
+        if (!account) return jsonResponse({ error: 'unauthorized: invalid or missing identity token' }, 401);
 
-      if (mode === 'get_scores') {
-        const student = slug(body.student);
-        if (!student) return jsonResponse({ error: 'student name required' }, 400);
-        const raw = await env.QUIZ_KV.get('scores:' + student);
-        return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
+        const key = 'scores:' + account.uid;
+        if (mode === 'get_scores') {
+          const raw = await env.QUIZ_KV.get(key);
+          return jsonResponse({ scores: raw ? JSON.parse(raw) : [] });
+        }
+
+        const subject = String(body.subject || '').trim().slice(0, 200);
+        const lecture = String(body.lecture || '').trim().slice(0, 300);
+        const difficulty = ['easy', 'medium', 'hard'].includes(body.difficulty) ? body.difficulty : '';
+        const score = Number(body.score);
+        const total = Number(body.total);
+        if (!Number.isFinite(score) || !Number.isFinite(total) || total <= 0 || score < 0 || score > total) {
+          return jsonResponse({ error: 'invalid score' }, 400);
+        }
+
+        let existingRaw;
+        try { existingRaw = await env.QUIZ_KV.get(key); } catch (e) {
+          return jsonResponse({ error: 'score storage unavailable' }, 503);
+        }
+        let list = [];
+        try { list = existingRaw ? JSON.parse(existingRaw) : []; } catch (e) { list = []; }
+        if (!Array.isArray(list)) list = [];
+        list.push({ subject, lecture, score, total, difficulty, at: Date.now() });
+        try {
+          await env.QUIZ_KV.put(key, JSON.stringify(list.slice(-100)));
+        } catch (e) {
+          return jsonResponse({ error: 'score storage unavailable' }, 503);
+        }
+        return jsonResponse({ ok: true });
       }
 
       // ---- admin: AI usage log + ban list ----
