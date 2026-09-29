@@ -190,11 +190,34 @@ async function callGemini(env, parts) {
   }
 
   const data = await apiResponse.json();
+
+  // A genuine Gemini safety block (as opposed to a quota/network/parse
+  // problem) - the ask handler is the only place that treats this as abuse.
+  const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
+  const finishReason = data.candidates && data.candidates[0] && data.candidates[0].finishReason;
+  if (blockReason || finishReason === 'SAFETY' || finishReason === 'PROHIBITED_CONTENT' || finishReason === 'BLOCKLIST') {
+    const err = new Error('Gemini blocked this content (' + (blockReason || finishReason) + ')');
+    err.safetyBlocked = true;
+    throw err;
+  }
+
   const rawText = (data.candidates && data.candidates[0] &&
     data.candidates[0].content && data.candidates[0].content.parts &&
     data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
   const cleaned = rawText.replace(/```json|```/g, '').trim();
-  return JSON.parse(cleaned); // let caller catch parse errors
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // tolerate stray text around the JSON object
+    const first = cleaned.indexOf('{');
+    const last = cleaned.lastIndexOf('}');
+    if (first !== -1 && last > first) {
+      try { return JSON.parse(cleaned.slice(first, last + 1)); } catch (e2) { /* fall through */ }
+    }
+    const err = new Error('رد الذكاء الاصطناعي جه بشكل غير مفهوم، جرّب تاني.');
+    err.status = 502;
+    throw err;
+  }
 }
 
 export default {
@@ -366,7 +389,7 @@ export default {
         return jsonResponse({ error: 'text or images required' }, 400);
       }
 
-      const maxChars = mode === 'summary' ? 90000 : 40000;
+      const maxChars = mode === 'summary' ? 90000 : (mode === 'ask' ? 150000 : 40000);
       const trimmedText = lectureText.slice(0, maxChars);
 
       // Cache key: based on content + mode + params. Skip caching for 'ask' (unique per question).
@@ -428,19 +451,26 @@ export default {
         if (dual) {
           instructions =
             'You are a patient, knowledgeable private tutor answering a student\'s question about their lecture. ' +
+            'IMPORTANT about the lecture content: it was extracted automatically from a PDF, so the text may be out of order, split into fragments, have Arabic words broken or reversed, or miss content that only exists in page images. ' +
+            'Read the WHOLE content carefully, match the question by meaning (synonyms, different wording, Arabic spelling variants like أ/ا and ة/ه, or the same idea in English/Arabic), and rebuild fragmented sentences before deciding. ' +
             'Your answer has TWO clearly separated parts: ' +
             '(A) "from_lecture": what the LECTURE CONTENT below itself says about the question — answer it directly and completely using only the lecture, in clear plain language, ' +
             'quoting the lecture\'s own terms, definitions, steps and numbers where relevant (roughly 3 to 7 sentences; use short numbered lines like "1) ..." if the answer has steps or several points). ' +
-            'If the lecture does not cover the question at all, set from_lecture to exactly "المحاضرة مش بتتكلم عن النقطة دي بشكل مباشر." and nothing else. ' +
+            'If the lecture covers the topic only partly or indirectly, give what it does say and state clearly which part it does not mention. ' +
+            'ONLY if, after a thorough search, the topic is truly absent, set from_lecture to "المحاضرة مش بتتكلم عن النقطة دي بشكل مباشر." — never use this when related content exists. '+
             '(B) "from_gemini": what YOU add from your own general knowledge to make the answer more complete and easier to understand — a fuller explanation, a helpful real-world example, ' +
             'important details or common exam pitfalls that the lecture leaves out (roughly 3 to 7 sentences). Do NOT just repeat part A, and it must stay consistent with the lecture; if you know of a difference from the lecture, mention it politely. ' +
+            'If the lecture does not cover the question, from_gemini must give the complete answer from your own knowledge. ' +
             'If the question is trivial and there is truly nothing useful to add, keep from_gemini to one short sentence. ' +
             safety +
             'Formatting: NEVER use markdown (no **bold**, no #headers, no asterisks). Plain text only; simple numbered lines like "1) ..." are allowed. ' +
             'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"flagged":false,"from_lecture":"...","from_gemini":"..."}. ' +
             'Answer in Arabic if the question is in Arabic, otherwise match the question language.\n\n' +
             `Subject: ${subject}\nStudent question: ${question}\n\nLecture content` +
-            (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+            (images.length
+              ? (trimmedText ? `:\n\n${trimmedText}\n\n(The attached images are the lecture's pages - use them too, they may contain content missing from the text above.)`
+                             : ' (read the text in the attached scanned pages):')
+              : `:\n\n${trimmedText}`);
         } else {
         instructions =
           'You are a patient private tutor chatting with a student about their lecture, like a WhatsApp conversation — NOT writing an article. ' +
@@ -498,15 +528,22 @@ export default {
             };
           }
         } catch (e) {
-          flagged = true;
-          result = { answer: '' };
+          if (e && e.safetyBlocked) {
+            flagged = true;
+            result = { answer: '' };
+          } else {
+            // quota / network / bad JSON etc. is NOT student misconduct:
+            // never log it as abuse and never count it toward an auto-ban.
+            throw e;
+          }
         }
 
         if (env.QUIZ_KV) {
           const rawLog = await env.QUIZ_KV.get('ai_log');
           const logList = rawLog ? JSON.parse(rawLog) : [];
           logList.push({
-            at: Date.now(), ip, student: studentName, subject, question,
+            at: Date.now(), ip, student: studentName, subject,
+            question: (body.raw_question ? String(body.raw_question).slice(0, 500) : question),
             answer: flagged ? '' : (result.answer || ''), flagged,
           });
           await env.QUIZ_KV.put('ai_log', JSON.stringify(logList.slice(-300))); // keep last 300
@@ -529,10 +566,11 @@ export default {
               if (bannedList2.indexOf(ip) === -1) bannedList2.push(ip);
               await env.QUIZ_KV.put('banned_users', JSON.stringify(bannedList2));
             }
-            return jsonResponse({ answer: 'تم حظرك تلقائياً من استخدام الذكاء الاصطناعي بسبب تكرار الإساءة.' });
+            return jsonResponse({ flagged: true, answer: 'تم حظرك تلقائياً من استخدام الذكاء الاصطناعي بسبب تكرار الإساءة.' });
           }
 
           return jsonResponse({
+            flagged: true,
             answer: 'ممنوع استخدام ألفاظ أو أسلوب مسيء — الرجاء الالتزام بالأدب. تكرار ده هيؤدي لحظرك تلقائياً من استخدام الذكاء الاصطناعي.',
           });
         }
