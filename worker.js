@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.7-ai-streaming';
+const BUILD_VERSION = 'v5.5-score-auth';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -171,35 +171,14 @@ async function checkRateLimit(env, ip) {
   return null; // allowed
 }
 
-// FIX (speed): gemini-2.5-flash spends extra time on an internal "thinking"
-// pass before answering, which was adding a couple of unnecessary seconds to
-// every quiz/summary/ask request even though none of these tasks need deep
-// multi-step reasoning. thinkingBudget: 0 turns that off. maxOutputTokens
-// caps how long a reply can run on for, which also bounds worst-case latency
-// (mode-dependent: 'ask' answers are meant to be short chat replies, other
-// modes generate structured lists so they get more room).
-// quiz/flashcards can ask for up to 25 items - scale the cap with `count` so
-// a big request doesn't get silently cut off mid-JSON (which would fail to
-// parse). ~140 tokens/item is a safe margin for an MCQ + explanation.
-function maxTokensFor(mode, count) {
-  if (mode === 'ask') return 700;
-  if (mode === 'compose_document' || mode === 'summary' || mode === 'video_script') return 4000;
-  if (mode === 'quiz' || mode === 'flashcards') return Math.min(8000, 1200 + (count || 10) * 140);
-  return 2200;
-}
-
-async function callGemini(env, parts, mode, count) {
+async function callGemini(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const apiResponse = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        thinkingConfig: { thinkingBudget: 0 },
-        maxOutputTokens: maxTokensFor(mode, count),
-      },
+      generationConfig: { responseMimeType: 'application/json' },
     }),
   });
 
@@ -216,113 +195,6 @@ async function callGemini(env, parts, mode, count) {
     data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
   const cleaned = rawText.replace(/```json|```/g, '').trim();
   return JSON.parse(cleaned); // let caller catch parse errors
-}
-
-// Streaming Ask AI: forwards Gemini's SSE chunks to the browser while also
-// collecting the final answer for the existing moderation/logging flow.
-// The browser gets plain text chunks, so it can render the answer progressively.
-async function streamAskGemini(env, parts, onChunk) {
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const apiResponse = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: {
-          thinkingConfig: { thinkingBudget: 0 },
-          maxOutputTokens: maxTokensFor('ask', 0),
-        },
-      }),
-      signal: controller.signal,
-    });
-
-    if (!apiResponse.ok) {
-      const errText = await apiResponse.text();
-      const err = new Error('Gemini API error: ' + errText);
-      err.status = apiResponse.status;
-      throw err;
-    }
-
-    if (!apiResponse.body) throw new Error('Gemini streaming body unavailable');
-
-    const reader = apiResponse.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-    let fullText = '';
-    let safetyBlocked = false;
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const blocks = buffer.split(/\n\n/);
-      buffer = blocks.pop() || '';
-
-      for (const block of blocks) {
-        for (const line of block.split(/\n/)) {
-          if (!line.startsWith('data:')) continue;
-          const raw = line.slice(5).trim();
-          if (!raw || raw === '[DONE]') continue;
-
-          let data;
-          try { data = JSON.parse(raw); } catch (e) { continue; }
-
-          const candidates = data.candidates || [];
-          for (const candidate of candidates) {
-            if (candidate.finishReason === 'SAFETY' ||
-                candidate.finishReason === 'BLOCKLIST' ||
-                candidate.finishReason === 'PROHIBITED_CONTENT') {
-              safetyBlocked = true;
-            }
-
-            const partsOut = candidate.content && candidate.content.parts || [];
-            for (const part of partsOut) {
-              if (part && typeof part.text === 'string' && part.text) {
-                fullText += part.text;
-                if (onChunk) onChunk(part.text);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    buffer += decoder.decode();
-    if (buffer.trim()) {
-      for (const line of buffer.split(/\n/)) {
-        if (!line.startsWith('data:')) continue;
-        const raw = line.slice(5).trim();
-        if (!raw || raw === '[DONE]') continue;
-        try {
-          const data = JSON.parse(raw);
-          const candidates = data.candidates || [];
-          for (const candidate of candidates) {
-            if (candidate.finishReason === 'SAFETY' ||
-                candidate.finishReason === 'BLOCKLIST' ||
-                candidate.finishReason === 'PROHIBITED_CONTENT') {
-              safetyBlocked = true;
-            }
-            const partsOut = candidate.content && candidate.content.parts || [];
-            for (const part of partsOut) {
-              if (part && typeof part.text === 'string' && part.text) {
-                fullText += part.text;
-                if (onChunk) onChunk(part.text);
-              }
-            }
-          }
-        } catch (e) {}
-      }
-    }
-
-    return { text: fullText, flagged: safetyBlocked };
-  } finally {
-    clearTimeout(timeoutId);
-  }
 }
 
 export default {
@@ -430,14 +302,18 @@ export default {
       // organized lecture (title + sections), used to export a PDF/Word file ----
       if (mode === 'compose_document') {
         const notes = (body.notes || '').trim();
-        if (!notes) return jsonResponse({ error: 'notes are required' }, 400);
+        const composeImages = Array.isArray(body.images) ? body.images.slice(0, 15) : [];
+        if (!notes && !composeImages.length) return jsonResponse({ error: 'notes are required' }, 400);
         const subject = body.subject || 'المادة';
         const requestedTitle = (body.title || '').trim();
-        const trimmedNotes = notes.slice(0, 20000);
+        const useAiKnowledge = body.use_ai_knowledge === true;
+        // raised from 20000: the app now sends full lecture text inside `notes`
+        const trimmedNotes = notes.slice(0, 45000);
 
         let cacheKey = null;
         if (env.QUIZ_KV) {
-          const fingerprint = trimmedNotes + '|compose_document|' + subject + '|' + requestedTitle;
+          const fingerprint = trimmedNotes + '|compose_document|' + subject + '|' + requestedTitle + '|' + (useAiKnowledge ? 'ai' : 'noai') +
+            '|' + composeImages.map((i) => (i.data || '').slice(0, 200)).join(',');
           cacheKey = 'cache:' + (await sha256Hex(fingerprint));
           const cached = await env.QUIZ_KV.get(cacheKey);
           if (cached) return jsonResponse(JSON.parse(cached));
@@ -448,18 +324,28 @@ export default {
         if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
         const instructions =
-          "You are a university teaching assistant turning a student's rough bullet-point notes into a clean, well-organized lecture document. " +
-          'Expand each point into clear explanatory text (do not just repeat the bullet as-is), stay accurate to what was given, and do not invent facts the notes do not imply. ' +
+          "You are a university teaching assistant turning the given material (lecture text and/or a student's rough notes) into a clean, well-organized lecture document. " +
+          'Expand each point into clear explanatory text (do not just repeat it as-is). ' +
+          'If a [تعليمات] block is present at the start of the input, follow it exactly. ' +
+          'Content that comes from the lecture material must stay accurate to it and never contradict it. ' +
+          (useAiKnowledge
+            ? 'You ARE allowed and expected to add extra accurate explanations, examples and context from your own knowledge, but put every such addition in its OWN separate section whose heading starts with "إضافة:" so it is clearly distinguishable from the lecture content. Do not mix added material into the lecture sections. '
+            : 'Do not add facts beyond the given material. ') +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
           'JSON shape: {"title":"...","sections":[{"heading":"...","paragraphs":["...","..."],"bullets":["...","..."]}]}. ' +
-          'Each section should use paragraphs or bullets or both, whichever fits the content best. Aim for 3 to 6 sections. ' +
-          "Write in Arabic if the notes are in Arabic, otherwise match the notes' language." +
+          'Each section should use paragraphs or bullets or both, whichever fits the content best. Aim for 4 to 10 sections depending on how much material there is. ' +
+          "Write in Arabic if the material is in Arabic, otherwise match the material's language." +
           (requestedTitle
             ? ` Use this as the document title, lightly polished if needed: "${requestedTitle}".`
             : ' Come up with a clear, specific title yourself.') +
-          `\n\nSubject: ${subject}\nStudent notes:\n\n${trimmedNotes}`;
+          `\n\nSubject: ${subject}\nMaterial:\n\n${trimmedNotes}` +
+          (composeImages.length ? '\n\n(Some lectures are scanned - read their text from the attached page images.)' : '');
 
-        const result = await callGemini(env, [{ text: instructions }], 'compose_document');
+        const composeParts = [{ text: instructions }];
+        for (const img of composeImages) {
+          if (img && img.data) composeParts.push({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data } });
+        }
+        const result = await callGemini(env, composeParts);
 
         if (cacheKey && env.QUIZ_KV) {
           await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
@@ -483,32 +369,9 @@ export default {
       const maxChars = mode === 'summary' ? 90000 : 40000;
       const trimmedText = lectureText.slice(0, maxChars);
 
-      if ((mode === 'ask' || mode === 'ask_stream') && env.QUIZ_KV && trimmedText) {
-        const lectureCacheKey = 'lecture_content:' + (await sha256Hex(trimmedText));
-        const existingLectureCache = await env.QUIZ_KV.get(lectureCacheKey);
-        if (!existingLectureCache) {
-          await env.QUIZ_KV.put(lectureCacheKey, trimmedText, { expirationTtl: 60 * 60 });
-        }
-      }
-
-      // Ask AI gets a one-hour lecture-content cache. Questions remain uncached,
-      // but the same extracted lecture text can be reused for several follow-ups.
-      let lectureContentCacheKey = null;
-      if ((mode === 'ask' || mode === 'ask_stream') && env.QUIZ_KV && trimmedText) {
-        lectureContentCacheKey = 'lecture_content:' + (await sha256Hex(trimmedText));
-        const cachedLecture = await env.QUIZ_KV.get(lectureContentCacheKey);
-        if (cachedLecture) {
-          try {
-            // Keep the exact text for this request; the browser also keeps a one-hour
-            // local cache, so this KV layer mainly helps across devices/sessions.
-            body.text = cachedLecture;
-          } catch (e) {}
-        }
-      }
-
-      // Cache key: based on content + mode + params. Skip caching for interactive 'ask' modes.
+      // Cache key: based on content + mode + params. Skip caching for 'ask' (unique per question).
       let cacheKey = null;
-      if (mode !== 'ask' && mode !== 'ask_stream' && env.QUIZ_KV) {
+      if (mode !== 'ask' && env.QUIZ_KV) {
         const fingerprint = (trimmedText || '') + '|' + images.map((i) => (i.data || '').slice(0, 200)).join(',') +
           '|' + mode + '|' + difficulty + '|' + count + '|' + subject;
         cacheKey = 'cache:' + (await sha256Hex(fingerprint));
@@ -556,14 +419,34 @@ export default {
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
           `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
-      } else if (mode === 'ask' || mode === 'ask_stream') {
+      } else if (mode === 'ask') {
         if (!question) return jsonResponse({ error: 'question is required for ask mode' }, 400);
+        const dual = body.dual === true;
+        const safety =
+          'SAFETY CHECK FIRST: if the student\'s message contains insults, profanity, harassment, or abuse (directed at you, the app, staff, or anyone else), ' +
+          'set "flagged" to true and leave all answer fields as empty strings — do not engage with or reference the abusive content at all. Otherwise set "flagged" to false. ';
+        if (dual) {
+          instructions =
+            'You are a patient, knowledgeable private tutor answering a student\'s question about their lecture. ' +
+            'Your answer has TWO clearly separated parts: ' +
+            '(A) "from_lecture": what the LECTURE CONTENT below itself says about the question — answer it directly and completely using only the lecture, in clear plain language, ' +
+            'quoting the lecture\'s own terms, definitions, steps and numbers where relevant (roughly 3 to 7 sentences; use short numbered lines like "1) ..." if the answer has steps or several points). ' +
+            'If the lecture does not cover the question at all, set from_lecture to exactly "المحاضرة مش بتتكلم عن النقطة دي بشكل مباشر." and nothing else. ' +
+            '(B) "from_gemini": what YOU add from your own general knowledge to make the answer more complete and easier to understand — a fuller explanation, a helpful real-world example, ' +
+            'important details or common exam pitfalls that the lecture leaves out (roughly 3 to 7 sentences). Do NOT just repeat part A, and it must stay consistent with the lecture; if you know of a difference from the lecture, mention it politely. ' +
+            'If the question is trivial and there is truly nothing useful to add, keep from_gemini to one short sentence. ' +
+            safety +
+            'Formatting: NEVER use markdown (no **bold**, no #headers, no asterisks). Plain text only; simple numbered lines like "1) ..." are allowed. ' +
+            'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"flagged":false,"from_lecture":"...","from_gemini":"..."}. ' +
+            'Answer in Arabic if the question is in Arabic, otherwise match the question language.\n\n' +
+            `Subject: ${subject}\nStudent question: ${question}\n\nLecture content` +
+            (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+        } else {
         instructions =
           'You are a patient private tutor chatting with a student about their lecture, like a WhatsApp conversation — NOT writing an article. ' +
           'Use the given lecture content as your source of truth (you may also draw on general subject knowledge to explain better, ' +
           'but stay consistent with what the lecture says). ' +
-          'SAFETY CHECK FIRST: if the student\'s message contains insults, profanity, harassment, or abuse (directed at you, the app, staff, or anyone else), ' +
-          'set "flagged" to true and leave "answer" as an empty string — do not engage with or reference the abusive content at all. Otherwise set "flagged" to false. ' +
+          safety +
           'STRICT rules for non-abusive questions: ' +
           '(1) Default answer length is SHORT — 2 to 5 sentences. If the question is just "what does X mean / define X", give ONLY a short plain-language definition, nothing else — no example unless asked. ' +
           '(2) Only give a worked example if the student is asking about a rule/law/problem they are confused about, or explicitly asks for an example — and even then keep it to ONE compact example, not multiple paragraphs. ' +
@@ -571,12 +454,11 @@ export default {
           '(4) End with a short, casual one-line offer like "قولّي لو عايز مثال" ONLY if you did not already give one — do not pad the answer with this every time. ' +
           '(5) If the student says something like "still don\'t get it" or asks for another example, give ONE different, simpler concrete example — still short. ' +
           'If the lecture genuinely does not cover what they are asking, say so honestly in one line instead of guessing. ' +
-          (mode === 'ask_stream'
-            ? 'For streaming mode, respond with ONLY the answer text. If the message is abusive, respond with exactly [[FLAGGED]]. No JSON, no markdown fences, no commentary. '
-            : 'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"flagged":false,"answer":"..."}. ') +
+          'Respond with ONLY valid JSON, no markdown fences, no commentary. JSON shape: {"flagged":false,"answer":"..."}. ' +
           'Answer in Arabic if the question is in Arabic, otherwise match the question language.\n\n' +
           `Subject: ${subject}\nStudent question: ${question}\n\nLecture content` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+        }
       } else {
         instructions =
           'You are an exam-question generator for a university lecture. ' +
@@ -598,73 +480,23 @@ export default {
       // block a response outright when the question itself is abusive, which
       // would otherwise throw and skip logging/moderation entirely. Treat any
       // failure here as flagged content rather than a generic technical error. ----
-      if (mode === 'ask_stream') {
-        const studentName = (body.student || 'غير معروف').toString().slice(0, 60);
-        const encoder = new TextEncoder();
-        const { readable, writable } = new TransformStream();
-        const writer = writable.getWriter();
-
-        (async () => {
-          let finalText = '';
-          let flagged = false;
-          try {
-            const streamed = await streamAskGemini(env, parts, (chunk) => {
-              finalText += chunk;
-              writer.write(encoder.encode('data: ' + JSON.stringify({ text: chunk }) + '\n\n'));
-            });
-
-            finalText = streamed.text || finalText;
-            flagged = streamed.flagged || finalText.indexOf('[[FLAGGED]]') === 0;
-
-            if (flagged) {
-              writer.write(encoder.encode('data: ' + JSON.stringify({ flagged: true, text: '' }) + '\n\n'));
-            }
-
-            if (env.QUIZ_KV) {
-              const rawLog = await env.QUIZ_KV.get('ai_log');
-              const logList = rawLog ? JSON.parse(rawLog) : [];
-              logList.push({
-                at: Date.now(),
-                ip,
-                student: studentName,
-                subject,
-                question,
-                answer: flagged ? '' : finalText,
-                flagged,
-                streaming: true,
-              });
-              await env.QUIZ_KV.put('ai_log', JSON.stringify(logList.slice(-300)));
-            }
-
-            writer.write(encoder.encode('data: ' + JSON.stringify({ done: true, flagged }) + '\n\n'));
-          } catch (e) {
-            const message = e && e.name === 'AbortError'
-              ? 'الخدمة مشغولة حاليًا، جرّب تاني بعد شوية.'
-              : (e && e.message ? e.message : String(e));
-            writer.write(encoder.encode('data: ' + JSON.stringify({ error: message }) + '\n\n'));
-          } finally {
-            writer.close();
-          }
-        })();
-
-        return new Response(readable, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'X-Accel-Buffering': 'no',
-            ...corsHeaders(),
-          },
-        });
-      }
-
       if (mode === 'ask') {
         const studentName = (body.student || 'غير معروف').toString().slice(0, 60);
         let result;
         let flagged = false;
         try {
-          result = await callGemini(env, parts, mode, count);
+          result = await callGemini(env, parts);
           flagged = !!result.flagged;
+          if (body.dual === true && !flagged) {
+            const fl = String(result.from_lecture || '').trim();
+            const fg = String(result.from_gemini || '').trim();
+            result = {
+              flagged: false,
+              from_lecture: fl,
+              from_gemini: fg,
+              answer: '📘 من المحاضرة:\n' + fl + '\n\n✨ من Gemini:\n' + fg,
+            };
+          }
         } catch (e) {
           flagged = true;
           result = { answer: '' };
@@ -708,7 +540,7 @@ export default {
         return jsonResponse(result);
       }
 
-      const result = await callGemini(env, parts, mode, count);
+      const result = await callGemini(env, parts);
 
       if (cacheKey && env.QUIZ_KV) {
         await env.QUIZ_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: CACHE_TTL_SECONDS });
