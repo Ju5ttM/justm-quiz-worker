@@ -171,6 +171,116 @@ async function checkRateLimit(env, ip) {
   return null; // allowed
 }
 
+
+// ---------------------------------------------------------------------------
+// Course-video analysis (owner only). The courses Worker owns the private R2
+// bucket, so this Worker never sees a raw R2 url: the owner's browser mints a
+// short-lived stream token from the courses Worker and sends the resulting
+// stream url here. Only that exact origin is ever fetched (no SSRF).
+// ---------------------------------------------------------------------------
+const COURSES_WORKER_ORIGIN = 'https://justm-courses.wolfiiiiiiiiiiii7.workers.dev';
+const MAX_VIDEO_BYTES = 400 * 1024 * 1024;   // refuse anything larger
+const BUFFER_VIDEO_BYTES = 50 * 1024 * 1024; // <= this: buffer, > this: stream
+const GEMINI_FILES_BASE = 'https://generativelanguage.googleapis.com';
+
+function isAllowedVideoUrl(u) {
+  try {
+    const url = new URL(u);
+    return url.origin === COURSES_WORKER_ORIGIN && url.searchParams.get('action') === 'stream';
+  } catch (e) { return false; }
+}
+
+// Plain-text Gemini call (callGemini forces JSON output).
+async function callGeminiText(env, parts) {
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const r = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+    body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
+  });
+  if (!r.ok) {
+    const err = new Error('Gemini API error: ' + (await r.text()));
+    err.status = r.status;
+    throw err;
+  }
+  const data = await r.json();
+  const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
+  if (blockReason) { const err = new Error('Gemini blocked this content (' + blockReason + ')'); err.status = 422; throw err; }
+  const text = (data.candidates && data.candidates[0] && data.candidates[0].content &&
+    data.candidates[0].content.parts && data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
+  if (!text.trim()) { const err = new Error('الذكاء الاصطناعي رجّع رد فاضي، جرّب تاني.'); err.status = 502; throw err; }
+  return text.trim();
+}
+
+// Uploads the video to Gemini's Files API (resumable protocol) and waits
+// until it is ACTIVE. Returns { name, uri, mimeType }.
+async function uploadVideoToGemini(env, videoRes, displayName) {
+  const mimeType = (videoRes.headers.get('Content-Type') || 'video/mp4').split(';')[0] || 'video/mp4';
+  let size = parseInt(videoRes.headers.get('Content-Length') || '0', 10);
+  let buffered = null;
+  if (!size || size <= BUFFER_VIDEO_BYTES) {
+    buffered = await videoRes.arrayBuffer();
+    size = buffered.byteLength;
+  }
+  if (!size) throw Object.assign(new Error('الفيديو فاضي أو مش متاح.'), { status: 422 });
+  if (size > MAX_VIDEO_BYTES) throw Object.assign(new Error('الفيديو كبير أوي على التحليل (أكتر من 400MB).'), { status: 413 });
+
+  const startRes = await fetch(`${GEMINI_FILES_BASE}/upload/v1beta/files`, {
+    method: 'POST',
+    headers: {
+      'x-goog-api-key': env.GEMINI_API_KEY,
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(size),
+      'X-Goog-Upload-Header-Content-Type': mimeType,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ file: { display_name: displayName } }),
+  });
+  const uploadUrl = startRes.headers.get('x-goog-upload-url');
+  if (!startRes.ok || !uploadUrl) {
+    throw Object.assign(new Error('تعذّر بدء رفع الفيديو لـ Gemini: ' + (await startRes.text())), { status: 502 });
+  }
+
+  let body;
+  if (buffered) {
+    body = buffered;
+  } else {
+    const { readable, writable } = new FixedLengthStream(size);
+    videoRes.body.pipeTo(writable); // runs concurrently with the upload fetch
+    body = readable;
+  }
+  const upRes = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Length': String(size),
+      'X-Goog-Upload-Offset': '0',
+      'X-Goog-Upload-Command': 'upload, finalize',
+    },
+    body,
+  });
+  if (!upRes.ok) throw Object.assign(new Error('فشل رفع الفيديو لـ Gemini: ' + (await upRes.text())), { status: 502 });
+  const upData = await upRes.json();
+  let file = upData.file;
+  if (!file || !file.name) throw Object.assign(new Error('رد غير متوقع من رفع الفيديو.'), { status: 502 });
+
+  // wait for processing
+  const deadline = Date.now() + 120000;
+  while (file.state === 'PROCESSING' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const st = await fetch(`${GEMINI_FILES_BASE}/v1beta/${file.name}`, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+    if (st.ok) file = await st.json();
+  }
+  if (file.state !== 'ACTIVE') throw Object.assign(new Error('Gemini لسه مخلصش معالجة الفيديو، جرّب تاني بعد شوية.'), { status: 504 });
+  return { name: file.name, uri: file.uri, mimeType: file.mimeType || mimeType };
+}
+
+async function deleteGeminiFile(env, name) {
+  try {
+    await fetch(`${GEMINI_FILES_BASE}/v1beta/${name}`, { method: 'DELETE', headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+  } catch (e) { /* best effort - files auto-expire after 48h anyway */ }
+}
+
 async function callGemini(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const apiResponse = await fetch(apiUrl, {
@@ -274,7 +384,7 @@ export default {
       // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user'];
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_notes', 'course_level_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -283,6 +393,72 @@ export default {
         if (!account || account.role !== 'owner') {
           return jsonResponse({ error: 'unauthorized' }, 403);
         }
+      }
+
+      // ---- owner: watch ONE course video and write detailed study notes ----
+      if (mode === 'video_notes') {
+        const lectureId = String(body.lecture_id || '').trim();
+        const videoUrl = String(body.video_url || '').trim();
+        const title = String(body.title || 'فيديو').slice(0, 150);
+        if (!lectureId || !isAllowedVideoUrl(videoUrl)) return jsonResponse({ error: 'invalid video' }, 400);
+
+        const cacheKey = 'vidnotes:' + (await sha256Hex(lectureId));
+        if (env.QUIZ_KV && body.force !== true) {
+          const cached = await env.QUIZ_KV.get(cacheKey);
+          if (cached) return jsonResponse({ notes: cached, cached: true });
+        }
+
+        const videoRes = await fetch(videoUrl);
+        if (!videoRes.ok) {
+          return jsonResponse({ error: 'تعذّر قراءة الفيديو (' + videoRes.status + '). افتح الفيديو مرة وجرّب تاني.' }, 502);
+        }
+
+        let uploaded = null;
+        try {
+          uploaded = await uploadVideoToGemini(env, videoRes, title);
+          const prompt =
+            'شاهد الفيديو التعليمي ده كامل (الصوت والصورة وأي نص أو شرائح أو سبورة أو أرقام بتظهر على الشاشة) واكتب ملاحظات مذاكرة مفصّلة ودقيقة عنه. ' +
+            'اكتب بنفس لغة الشرح في الفيديو (غالبًا عربي، وسيب المصطلحات الإنجليزية بالإنجليزي). ' +
+            'لازم تغطي: كل الأفكار والمفاهيم الأساسية بالترتيب، التعريفات، القواعد والقوانين والمعادلات، الخطوات العملية، الأمثلة اللي اتحلت (بأرقامها)، ونصائح المدرّس أو تنبيهاته. ' +
+            'ما تخترعش معلومة مش موجودة في الفيديو. اكتب نص عادي بدون markdown (من غير ** أو #)، وتقدر تستخدم أسطر مرقّمة. ' +
+            'ابدأ بسطر: "الموضوع: ..." بعدين الملاحظات.\n\nعنوان الفيديو: ' + title;
+          const notes = await callGeminiText(env, [
+            { fileData: { mimeType: uploaded.mimeType, fileUri: uploaded.uri } },
+            { text: prompt },
+          ]);
+          if (env.QUIZ_KV) await env.QUIZ_KV.put(cacheKey, notes, { expirationTtl: CACHE_TTL_SECONDS });
+          return jsonResponse({ notes, cached: false });
+        } finally {
+          if (uploaded) await deleteGeminiFile(env, uploaded.name);
+        }
+      }
+
+      // ---- owner: merge every video's notes into ONE level-wide summary ----
+      if (mode === 'course_level_summary') {
+        const items = Array.isArray(body.notes) ? body.notes : [];
+        const courseName = String(body.course_name || 'الكورس').slice(0, 100);
+        const courseNumber = Number(body.course_number) || 1;
+        const joined = items
+          .map((it, i) => '### جزء ' + (i + 1) + '\n' + String(it && it.notes || '').trim())
+          .filter((t) => t.length > 20)
+          .join('\n\n')
+          .slice(0, 150000);
+        if (!joined) return jsonResponse({ error: 'notes are required' }, 400);
+
+        const prompt =
+          'ده مادة مفصّلة طالعة من كل فيديوهات مستوى كامل في كورس "' + courseName + '" (المستوى ' + courseNumber + '). ' +
+          'اكتب ملخص شامل واحد للمستوى كله بحيث الطالب يذاكر منه بدل ما يرجع للفيديوهات. ' +
+          'قواعد مهمة: ' +
+          '(1) نظّم الملخص حسب الموضوعات والمفاهيم نفسها، مش فيديو فيديو، وما تذكرش "الفيديو الأول/التاني" ولا أرقام الأجزاء. ' +
+          '(2) ادمج الأفكار المتكررة في مكان واحد ورتّب الأقسام ترتيب منطقي من الأساسيات للأصعب. ' +
+          '(3) خلّي التعريفات والقواعد والقوانين والخطوات والأمثلة المهمة (بأرقامها) موجودة كاملة ودقيقة، ومتخترعش معلومات مش في المادة. ' +
+          '(4) اختم بقسم "نقاط المراجعة السريعة" فيه أهم النقاط في قايمة قصيرة. ' +
+          'اكتب بنفس لغة المادة. رد بـ JSON صالح فقط بدون markdown fences، بالشكل: ' +
+          '{"title":"...","sections":[{"heading":"...","paragraphs":["..."],"bullets":["..."]}]}. ' +
+          'استخدم من 6 لـ 14 قسم حسب حجم المادة، وكل قسم فيه paragraphs أو bullets أو الاتنين.\n\nالمادة:\n\n' + joined;
+
+        const result = await callGemini(env, [{ text: prompt }]);
+        return jsonResponse(result);
       }
 
       if (mode === 'get_ai_log') {
