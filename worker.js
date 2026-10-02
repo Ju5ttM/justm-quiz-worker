@@ -388,7 +388,7 @@ export default {
       // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -404,6 +404,16 @@ export default {
       //   video_start    : read the video, hand it to Gemini (or return cached notes)
       //   video_poll     : is Gemini done processing the file?
       //   video_generate : Gemini watches it and writes the notes
+      // lets the app verify the Service Binding BEFORE it starts analysing dozens of videos
+      if (mode === 'video_env_check') {
+        return jsonResponse({
+          binding: !!(env.COURSES_WORKER && typeof env.COURSES_WORKER.fetch === 'function'),
+          binding_type: typeof env.COURSES_WORKER,
+          gemini_key: !!env.GEMINI_API_KEY,
+          kv: !!env.QUIZ_KV,
+        });
+      }
+
       if (mode === 'video_start') {
         const lectureId = String(body.lecture_id || '').trim();
         const videoUrl = String(body.video_url || '').trim();
