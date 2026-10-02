@@ -5,3 +5,7 @@ compatibility_date = "2025-01-01"
 [[kv_namespaces]]
 binding = "QUIZ_KV"
 id = "ac1c3bba6c7e4bc2a4c21c2e513e276f"
+
+[[services]]
+binding = "COURSES_WORKER"
+service = "justm-courses"
