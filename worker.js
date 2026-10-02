@@ -408,9 +408,24 @@ export default {
           if (cached) return jsonResponse({ notes: cached, cached: true });
         }
 
-        const videoRes = await fetch(videoUrl);
+        // A Worker can't fetch another Worker's *.workers.dev URL from the same
+        // account over the public internet (Cloudflare answers 404 / error 1042),
+        // so use a Service Binding named COURSES_WORKER when it is configured.
+        let videoRes;
+        try {
+          videoRes = (env.COURSES_WORKER && typeof env.COURSES_WORKER.fetch === 'function')
+            ? await env.COURSES_WORKER.fetch(videoUrl)
+            : await fetch(videoUrl);
+        } catch (e) {
+          return jsonResponse({ error: 'تعذّر الوصول لـ Worker الكورسات: ' + (e && e.message ? e.message : e) }, 502);
+        }
         if (!videoRes.ok) {
-          return jsonResponse({ error: 'تعذّر قراءة الفيديو (' + videoRes.status + '). افتح الفيديو مرة وجرّب تاني.' }, 502);
+          let detail = '';
+          try { detail = (await videoRes.text()).replace(/\s+/g, ' ').slice(0, 160); } catch (e) { /* ignore */ }
+          const hint = (!env.COURSES_WORKER && videoRes.status === 404)
+            ? ' — غالبًا لازم تضيف Service Binding اسمه COURSES_WORKER لـ Worker الكورسات (Settings > Bindings).'
+            : '';
+          return jsonResponse({ error: 'تعذّر قراءة الفيديو (' + videoRes.status + ')' + (detail ? ' [' + detail + ']' : '') + hint }, 502);
         }
 
         let uploaded = null;
