@@ -214,7 +214,7 @@ async function callGeminiText(env, parts) {
 
 // Uploads the video to Gemini's Files API (resumable protocol) and waits
 // until it is ACTIVE. Returns { name, uri, mimeType }.
-async function uploadVideoToGemini(env, videoRes, displayName) {
+async function uploadVideoToGemini(env, videoRes, displayName, opts) {
   const mimeType = (videoRes.headers.get('Content-Type') || 'video/mp4').split(';')[0] || 'video/mp4';
   let size = parseInt(videoRes.headers.get('Content-Length') || '0', 10);
   let buffered = null;
@@ -263,6 +263,10 @@ async function uploadVideoToGemini(env, videoRes, displayName) {
   const upData = await upRes.json();
   let file = upData.file;
   if (!file || !file.name) throw Object.assign(new Error('رد غير متوقع من رفع الفيديو.'), { status: 502 });
+
+  if (opts && opts.wait === false) {
+    return { name: file.name, uri: file.uri, mimeType: file.mimeType || mimeType, state: file.state };
+  }
 
   // wait for processing
   const deadline = Date.now() + 120000;
@@ -384,7 +388,7 @@ export default {
       // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_notes', 'course_level_summary'];
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -395,17 +399,20 @@ export default {
         }
       }
 
-      // ---- owner: watch ONE course video and write detailed study notes ----
-      if (mode === 'video_notes') {
+      // ---- owner: ONE course video -> study notes, in 3 short steps so the app
+      // can show real progress and no single request has to stay open for minutes:
+      //   video_start    : read the video, hand it to Gemini (or return cached notes)
+      //   video_poll     : is Gemini done processing the file?
+      //   video_generate : Gemini watches it and writes the notes
+      if (mode === 'video_start') {
         const lectureId = String(body.lecture_id || '').trim();
         const videoUrl = String(body.video_url || '').trim();
         const title = String(body.title || 'فيديو').slice(0, 150);
         if (!lectureId || !isAllowedVideoUrl(videoUrl)) return jsonResponse({ error: 'invalid video' }, 400);
 
-        const cacheKey = 'vidnotes:' + (await sha256Hex(lectureId));
         if (env.QUIZ_KV && body.force !== true) {
-          const cached = await env.QUIZ_KV.get(cacheKey);
-          if (cached) return jsonResponse({ notes: cached, cached: true });
+          const cached = await env.QUIZ_KV.get('vidnotes:' + (await sha256Hex(lectureId)));
+          if (cached) return jsonResponse({ cached: true, notes: cached });
         }
 
         // A Worker can't fetch another Worker's *.workers.dev URL from the same
@@ -422,15 +429,35 @@ export default {
         if (!videoRes.ok) {
           let detail = '';
           try { detail = (await videoRes.text()).replace(/\s+/g, ' ').slice(0, 160); } catch (e) { /* ignore */ }
-          const hint = (!env.COURSES_WORKER && videoRes.status === 404)
-            ? ' — غالبًا لازم تضيف Service Binding اسمه COURSES_WORKER لـ Worker الكورسات (Settings > Bindings).'
+          const hint = (!(env.COURSES_WORKER && typeof env.COURSES_WORKER.fetch === 'function') && videoRes.status === 404)
+            ? ' — لازم تضيف Service Binding (مش Variable) اسمه COURSES_WORKER لـ Worker الكورسات.'
             : '';
           return jsonResponse({ error: 'تعذّر قراءة الفيديو (' + videoRes.status + ')' + (detail ? ' [' + detail + ']' : '') + hint }, 502);
         }
 
-        let uploaded = null;
+        const up = await uploadVideoToGemini(env, videoRes, title, { wait: false });
+        return jsonResponse({ cached: false, file_name: up.name, file_uri: up.uri, mime_type: up.mimeType, state: up.state });
+      }
+
+      if (mode === 'video_poll') {
+        const fileName = String(body.file_name || '');
+        if (!/^files\/[A-Za-z0-9_-]+$/.test(fileName)) return jsonResponse({ error: 'invalid file' }, 400);
+        const st = await fetch(`${GEMINI_FILES_BASE}/v1beta/${fileName}`, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+        if (!st.ok) return jsonResponse({ error: 'تعذّر قراءة حالة الفيديو عند Gemini (' + st.status + ')' }, 502);
+        const f = await st.json();
+        return jsonResponse({ state: f.state || 'UNKNOWN' });
+      }
+
+      if (mode === 'video_generate') {
+        const lectureId = String(body.lecture_id || '').trim();
+        const fileName = String(body.file_name || '');
+        const fileUri = String(body.file_uri || '');
+        const mimeType = String(body.mime_type || 'video/mp4');
+        const title = String(body.title || 'فيديو').slice(0, 150);
+        if (!lectureId || !/^files\/[A-Za-z0-9_-]+$/.test(fileName) || fileUri.indexOf(GEMINI_FILES_BASE) !== 0) {
+          return jsonResponse({ error: 'invalid file' }, 400);
+        }
         try {
-          uploaded = await uploadVideoToGemini(env, videoRes, title);
           const prompt =
             'شاهد الفيديو التعليمي ده كامل (الصوت والصورة وأي نص أو شرائح أو سبورة أو أرقام بتظهر على الشاشة) واكتب ملاحظات مذاكرة مفصّلة ودقيقة عنه. ' +
             'اكتب بنفس لغة الشرح في الفيديو (غالبًا عربي، وسيب المصطلحات الإنجليزية بالإنجليزي). ' +
@@ -438,13 +465,13 @@ export default {
             'ما تخترعش معلومة مش موجودة في الفيديو. اكتب نص عادي بدون markdown (من غير ** أو #)، وتقدر تستخدم أسطر مرقّمة. ' +
             'ابدأ بسطر: "الموضوع: ..." بعدين الملاحظات.\n\nعنوان الفيديو: ' + title;
           const notes = await callGeminiText(env, [
-            { fileData: { mimeType: uploaded.mimeType, fileUri: uploaded.uri } },
+            { fileData: { mimeType, fileUri } },
             { text: prompt },
           ]);
-          if (env.QUIZ_KV) await env.QUIZ_KV.put(cacheKey, notes, { expirationTtl: CACHE_TTL_SECONDS });
-          return jsonResponse({ notes, cached: false });
+          if (env.QUIZ_KV) await env.QUIZ_KV.put('vidnotes:' + (await sha256Hex(lectureId)), notes, { expirationTtl: CACHE_TTL_SECONDS });
+          return jsonResponse({ notes });
         } finally {
-          if (uploaded) await deleteGeminiFile(env, uploaded.name);
+          await deleteGeminiFile(env, fileName);
         }
       }
 
