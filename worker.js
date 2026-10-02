@@ -285,14 +285,14 @@ async function deleteGeminiFile(env, name) {
   } catch (e) { /* best effort - files auto-expire after 48h anyway */ }
 }
 
-async function callGemini(env, parts) {
+async function callGemini(env, parts, extraConfig) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const apiResponse = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: { responseMimeType: 'application/json' },
+      generationConfig: Object.assign({ responseMimeType: 'application/json' }, extraConfig || {}),
     }),
   });
 
@@ -484,7 +484,7 @@ export default {
           .map((it, i) => '### جزء ' + (i + 1) + '\n' + String(it && it.notes || '').trim())
           .filter((t) => t.length > 20)
           .join('\n\n')
-          .slice(0, 150000);
+          .slice(0, 400000);
         if (!joined) return jsonResponse({ error: 'notes are required' }, 400);
 
         const prompt =
@@ -494,12 +494,25 @@ export default {
           '(1) نظّم الملخص حسب الموضوعات والمفاهيم نفسها، مش فيديو فيديو، وما تذكرش "الفيديو الأول/التاني" ولا أرقام الأجزاء. ' +
           '(2) ادمج الأفكار المتكررة في مكان واحد ورتّب الأقسام ترتيب منطقي من الأساسيات للأصعب. ' +
           '(3) خلّي التعريفات والقواعد والقوانين والخطوات والأمثلة المهمة (بأرقامها) موجودة كاملة ودقيقة، ومتخترعش معلومات مش في المادة. ' +
+          '(3.5) اكتب نص عادي بدون أي علامات markdown: ممنوع ** أو # أو - في أول السطر. ' +
           '(4) اختم بقسم "نقاط المراجعة السريعة" فيه أهم النقاط في قايمة قصيرة. ' +
           'اكتب بنفس لغة المادة. رد بـ JSON صالح فقط بدون markdown fences، بالشكل: ' +
           '{"title":"...","sections":[{"heading":"...","paragraphs":["..."],"bullets":["..."]}]}. ' +
           'استخدم من 6 لـ 14 قسم حسب حجم المادة، وكل قسم فيه paragraphs أو bullets أو الاتنين.\n\nالمادة:\n\n' + joined;
 
-        const result = await callGemini(env, [{ text: prompt }]);
+        // a whole level can produce a long document: raise the output cap so the
+        // JSON isn't cut off mid-way, then strip any markdown that slipped in.
+        const result = await callGemini(env, [{ text: prompt }], { maxOutputTokens: 60000 });
+        const clean = (t) => String(t == null ? '' : t)
+          .replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*\*/g, '').replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/`+/g, '').trim();
+        if (result && Array.isArray(result.sections)) {
+          result.title = clean(result.title);
+          result.sections = result.sections.map((sec) => ({
+            heading: clean(sec.heading),
+            paragraphs: (sec.paragraphs || []).map(clean).filter(Boolean),
+            bullets: (sec.bullets || []).map(clean).filter(Boolean),
+          }));
+        }
         return jsonResponse(result);
       }
 
