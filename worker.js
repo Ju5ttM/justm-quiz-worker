@@ -675,14 +675,24 @@ export default {
       } else if (mode === 'video_script') {
         instructions =
           'You are turning a university lecture into a narrated slideshow script for a student to watch and listen to. ' +
-          'Break the material into 6 to 10 slides that progress logically through the content (intro/overview slide first, then one concept per slide, short wrap-up slide last). ' +
-          'For each slide: "title" is a short slide heading (max ~6 words), "bullets" are 2-4 short on-screen points (each under ~10 words), ' +
-          'and "narration" is what a teacher would SAY out loud for this slide — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim, explaining the point properly. ' +
+          'The script must cover BOTH the theory AND the practical part of the lecture. ' +
+          'PART 1 - theory: an intro/overview slide first, then one concept per slide (definitions, rules, classifications, formulas, steps). ' +
+          'PART 2 - practical (MANDATORY whenever the lecture contains any solved examples, exercises, problems, calculations, journal entries, tables of numbers, or case studies): ' +
+          'cover EVERY one of them, in the order they appear. Never skip, merge or summarize them away as just "there are examples". ' +
+          'Give each problem its own slide, or two slides if it is long. For a problem slide: the title starts with "مسألة:" or "مثال:" plus a short name; ' +
+          'the bullets state the given data, then the solution steps with the REAL numbers from the lecture, then the final answer (3 to 6 bullets, each under ~14 words, numbers and formulas kept exactly as in the lecture); ' +
+          'the narration walks through the solution step by step like a teacher at the board, explaining WHY each step is done, using the real numbers (3 to 6 spoken sentences). ' +
+          'If the lecture has no practical part, just cover the theory well and do not invent problems. ' +
+          'Finish with a short wrap-up slide (key points to remember). ' +
+          'Use as many slides as needed to cover everything: normally 8 to 16, and never fewer than the number of concepts plus problems in the lecture. ' +
+          'For theory slides: \"title\" is a short heading (max ~6 words), \"bullets\" are 2-4 short on-screen points (each under ~10 words), ' +
+          'and \"narration\" is what a teacher would SAY out loud — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim. ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-          'JSON shape: {"slides":[{"title":"...","bullets":["...","..."],"narration":"..."}]}. ' +
+          'JSON shape: {\"slides\":[{\"title\":\"...\",\"bullets\":[\"...\",\"...\"],\"narration\":\"...\"}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
           `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
+
       } else if (mode === 'ask') {
         if (!question) return jsonResponse({ error: 'question is required for ask mode' }, 400);
         const dual = body.dual === true;
