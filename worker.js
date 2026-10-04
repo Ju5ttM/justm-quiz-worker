@@ -191,6 +191,10 @@ function isAllowedVideoUrl(u) {
 }
 
 // Plain-text Gemini call (callGemini forces JSON output).
+// Bump a mode's version whenever its prompt changes: cached results are keyed
+// by content + mode only, so without this the OLD cached answer keeps being served.
+const PROMPT_VERSIONS = { video_script: '2' };
+
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const r = await fetch(apiUrl, {
@@ -637,7 +641,7 @@ export default {
       let cacheKey = null;
       if (mode !== 'ask' && env.QUIZ_KV) {
         const fingerprint = (trimmedText || '') + '|' + images.map((i) => (i.data || '').slice(0, 200)).join(',') +
-          '|' + mode + '|' + difficulty + '|' + count + '|' + subject;
+          '|' + mode + '|' + difficulty + '|' + count + '|' + subject + '|pv:' + (PROMPT_VERSIONS[mode] || '1');
         cacheKey = 'cache:' + (await sha256Hex(fingerprint));
         const cached = await env.QUIZ_KV.get(cacheKey);
         if (cached) return jsonResponse(JSON.parse(cached));
