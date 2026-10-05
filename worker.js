@@ -566,6 +566,63 @@ export default {
         return jsonResponse({ error: 'ممنوع استخدام الذكاء الاصطناعي من هذا الجهاز — تواصل مع إدارة المنصة لو ده غلط.' }, 403);
       }
 
+      // ---- AI explainer video script: turn a selected part of the lecture into\n      // a short, practical Arabic storyboard that the app can render/download.\n      if (mode === 'video_explain') {\n        const text = String(body.text || '').trim().slice(0, 70000);\n        const images = Array.isArray(body.images) ? body.images.slice(0, 8) : [];\n        const subject = String(body.subject || 'المادة').slice(0, 120);\n        const request = String(body.request || '').trim().slice(0, 1200);\n        if (!text && !images.length) return jsonResponse({ error: 'محتوى المحاضرة مطلوب' }, 400);\n        if (!request) return jsonResponse({ error: 'اكتب الجزء اللي عايز شرحه' }, 400);\n\n        const prompt =\n          'أنت مدرس عربي ممتاز ومصمم فيديوهات تعليمية. المطلوب تحويل الجزء الذي حدده الطالب إلى سيناريو فيديو تعليمي عالي الجودة. ' +
+          'استخرج أولًا نوع الشرح المطلوب من طلب الطالب: نظري، عملي، مذاكرة/امتحان، سريع، عميق، بصري، أو مخصص. ' +
+          'التزم بالنوع المطلوب ولا تخلط الأنماط إلا إذا طلب الطالب ذلك. ' +
+          'في الشرح العملي استخدم تطبيقًا حقيقيًا من المادة أو مثالًا قريبًا جدًا من محتواها، وفي النظري ركز على الفهم والعلاقات بين المفاهيم، وفي المذاكرة ركز على التعريفات والنقاط التي تحتاج تثبيتًا، وفي الامتحان أضف سؤال مراجعة قصير في النهاية. ' +
+\n          'اعتمد على المادة المرفقة فقط، ولا تخترع معلومات غير موجودة فيها. لو طلب الطالب نقطة غير واضحة في المادة، قل ذلك داخل الشرح بدل الاختراع. ' +\n          'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. ' +\n          'الشرح لازم يكون عملي: اشرح الفكرة ثم مثال/تطبيق خطوة بخطوة كلما كانت المادة تسمح بذلك. ' +\n          'قسّم الفيديو إلى 4 إلى 10 مشاهد قصيرة، وكل مشهد يحتوي عنوانًا، ونصًا مختصرًا يظهر على الشاشة، ونصًا سرديًا عربيًا للشرح. ' +\n          'مدة المشهد بين 5 و12 ثانية. اجعل الانتقال بين المشاهد منطقيًا، وابدأ بمقدمة قصيرة جدًا وانتهِ بخلاصة. ' +\n          'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +\n          '{"title":"...","language":"ar","scenes":[{"title":"...","on_screen":"...","narration":"...","duration":8,"example":true}]}. ' +\n          'الموضوع: ' + subject + '\nطلب الطالب: ' + request + '\n\nمادة المحاضرة:\n' + text;\n\n        const parts = [{ text: prompt }];\n        for (const img of images) {\n          if (img && img.mimeType && img.data) parts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });\n        }\n        const result = await callGemini(env, parts, { maxOutputTokens: 18000 });\n        if (!result || !Array.isArray(result.scenes) || !result.scenes.length) {\n          return jsonResponse({ error: 'Gemini ماطلعش سيناريو فيديو صالح.' }, 502);\n        }\n        const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();\n        result.title = clean(result.title || 'شرح بالفيديو');\n        result.language = 'ar';\n        result.scenes = result.scenes.slice(0, 10).map((x, i) => ({\n          title: clean(x.title || ('النقطة ' + (i + 1))),\n          on_screen: clean(x.on_screen || x.title || ''),\n          narration: clean(x.narration || x.on_screen || ''),\n          duration: Math.max(5, Math.min(12, Number(x.duration) || 8)),\n          example: !!x.example\n        }));\n        return jsonResponse(result);\n      }\n\n
+      // ---- AI video narration audio: real Gemini TTS WAV -----------------
+      // Generates one Arabic WAV from the final narration. The browser then
+      // combines this audio track with the visual canvas recording.
+      if (mode === 'video_tts') {
+        const narration = String(body.narration || '').trim().slice(0, 14000);
+        const voice = String(body.voice || 'Kore').trim().slice(0, 40);
+        const style = String(body.style || 'clear, warm, patient university teacher').trim().slice(0, 300);
+        if (!narration) return jsonResponse({ error: 'نص الشرح الصوتي مطلوب' }, 400);
+        if (!env.GEMINI_API_KEY) return jsonResponse({ error: 'GEMINI_API_KEY غير مضبوط في Worker' }, 503);
+
+        const ttsUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent';
+        const ttsRes = await fetch(ttsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': env.GEMINI_API_KEY
+          },
+          body: JSON.stringify({
+            contents: [{
+              role: 'user',
+              parts: [{
+                text: narration,
+                speech_metadata: { style }
+              }]
+            }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: { voice }
+              }
+            }
+          })
+        });
+
+        if (!ttsRes.ok) {
+          const detail = (await ttsRes.text()).slice(0, 800);
+          return jsonResponse({ error: 'تعذر إنشاء الصوت العربي' + (detail ? ': ' + detail : '') }, 502);
+        }
+
+        const ttsData = await ttsRes.json();
+        const part = ttsData?.candidates?.[0]?.content?.parts?.find(p => p?.inlineData?.data);
+        const audioBase64 = part?.inlineData?.data;
+        if (!audioBase64) return jsonResponse({ error: 'Gemini لم يُرجع ملفًا صوتيًا صالحًا.' }, 502);
+
+        return jsonResponse({
+          mimeType: 'audio/wav',
+          sampleRate: 24000,
+          audioBase64,
+          voice
+        });
+      }
+
       // ---- compose_document: turn a student's raw notes into a full,
       // organized lecture (title + sections), used to export a PDF/Word file ----
       if (mode === 'compose_document') {
