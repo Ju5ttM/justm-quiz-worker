@@ -566,13 +566,66 @@ export default {
         return jsonResponse({ error: 'ممنوع استخدام الذكاء الاصطناعي من هذا الجهاز — تواصل مع إدارة المنصة لو ده غلط.' }, 403);
       }
 
-      // ---- AI explainer video script: turn a selected part of the lecture into\n      // a short, practical Arabic storyboard that the app can render/download.\n      if (mode === 'video_explain') {\n        const text = String(body.text || '').trim().slice(0, 70000);\n        const images = Array.isArray(body.images) ? body.images.slice(0, 8) : [];\n        const subject = String(body.subject || 'المادة').slice(0, 120);\n        const request = String(body.request || '').trim().slice(0, 1200);\n        if (!text && !images.length) return jsonResponse({ error: 'محتوى المحاضرة مطلوب' }, 400);\n        const effectiveRequest = request || 'اشرح المحاضرة كاملة من البداية للنهاية، مع الحفاظ على ترتيب الأفكار وعدم إسقاط النقاط الأساسية.';\n\n        const prompt =\n          'أنت مدرس عربي ممتاز ومصمم فيديوهات تعليمية. المطلوب تحويل الجزء الذي حدده الطالب إلى سيناريو فيديو تعليمي عالي الجودة. ' +
-          'استخرج أولًا نوع الشرح المطلوب من طلب الطالب: نظري، عملي، مذاكرة/امتحان، سريع، عميق، بصري، أو مخصص. ' +
-          'التزم بالنوع المطلوب ولا تخلط الأنماط إلا إذا طلب الطالب ذلك. ' +
-          'في الشرح العملي استخدم تطبيقًا حقيقيًا من المادة أو مثالًا قريبًا جدًا من محتواها، وفي النظري ركز على الفهم والعلاقات بين المفاهيم، وفي المذاكرة ركز على التعريفات والنقاط التي تحتاج تثبيتًا، وفي الامتحان أضف سؤال مراجعة قصير في النهاية. ' +
-          'اعتمد على المادة المرفقة فقط، ولا تخترع معلومات غير موجودة فيها. لو طلب الطالب نقطة غير واضحة في المادة، قل ذلك داخل الشرح بدل الاختراع. ' +\n          'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. ' +
-          'الشرح لازم يكون عملي: اشرح الفكرة ثم مثال/تطبيق خطوة بخطوة كلما كانت المادة تسمح بذلك. ' +
-          'قسّم الفيديو إلى 4 إلى 10 مشاهد قصيرة، وكل مشهد يحتوي عنوانًا، ونصًا مختصرًا يظهر على الشاشة، ونصًا سرديًا عربيًا للشرح. ' +\n          'مدة المشهد بين 5 و12 ثانية. اجعل الانتقال بين المشاهد منطقيًا، وابدأ بمقدمة قصيرة جدًا وانتهِ بخلاصة. ' +\n          'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +\n          '{"title":"...","language":"ar","scenes":[{"title":"...","on_screen":"...","narration":"...","duration":8,"example":true}]}. ' +\n          'الموضوع: ' + subject + '\nطلب الطالب: ' + effectiveRequest + '\n\nمادة المحاضرة:\n' + text;\n\n        const parts = [{ text: prompt }];\n        for (const img of images) {\n          if (img && img.mimeType && img.data) parts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });\n        }\n        const result = await callGemini(env, parts, { maxOutputTokens: 18000 });\n        if (!result || !Array.isArray(result.scenes) || !result.scenes.length) {\n          return jsonResponse({ error: 'Gemini ماطلعش سيناريو فيديو صالح.' }, 502);\n        }\n        const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();\n        result.title = clean(result.title || 'شرح بالفيديو');\n        result.language = 'ar';\n        result.scenes = result.scenes.slice(0, 10).map((x, i) => ({\n          title: clean(x.title || ('النقطة ' + (i + 1))),\n          on_screen: clean(x.on_screen || x.title || ''),\n          narration: clean(x.narration || x.on_screen || ''),\n          duration: Math.max(5, Math.min(12, Number(x.duration) || 8)),\n          example: !!x.example\n        }));\n        return jsonResponse(result);\n      }\n\n
+      // ---- AI explainer video script ------------------------------
+      if (mode === 'video_explain') {
+        const text = String(body.text || '').trim().slice(0, 70000);
+        const images = Array.isArray(body.images) ? body.images.slice(0, 8) : [];
+        const subject = String(body.subject || 'المادة').slice(0, 120);
+        const request = String(body.request || '').trim().slice(0, 1200);
+        if (!text && !images.length) {
+          return jsonResponse({ error: 'محتوى المحاضرة مطلوب' }, 400);
+        }
+        const effectiveRequest = request || 'اشرح المحاضرة كاملة من البداية للنهاية، مع الحفاظ على ترتيب الأفكار وعدم إسقاط النقاط الأساسية.';
+
+        const prompt =
+          'أنت مدرس عربي ممتاز ومصمم فيديوهات تعليمية. المطلوب تحويل المادة المرفقة إلى سيناريو فيديو تعليمي عالي الجودة. ' +
+          'استخرج نوع الشرح المطلوب من طلب الطالب: نظري، عملي، مذاكرة/امتحان، سريع، عميق، بصري، أو مخصص. ' +
+          'التزم بالنوع المطلوب. في الشرح العملي استخدم تطبيقًا حقيقيًا من المادة أو مثالًا قريبًا جدًا من محتواها. ' +
+          'في النظري ركز على الفهم والعلاقات بين المفاهيم، وفي المذاكرة ركز على التعريفات والنقاط المهمة، وفي الامتحان أضف سؤال مراجعة قصير في النهاية. ' +
+          'اعتمد على المادة المرفقة فقط، ولا تخترع معلومات غير موجودة فيها. لو طلب الطالب نقطة غير واضحة في المادة، قل ذلك بدل الاختراع. ' +
+          'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. ' +
+          'قسّم الفيديو إلى 4 إلى 10 مشاهد قصيرة. كل مشهد يجب أن يحتوي عنوانًا، ونصًا مختصرًا على الشاشة، ونصًا سرديًا عربيًا كاملًا يصلح للصوت. ' +
+          'مدة المشهد بين 5 و12 ثانية. ابدأ بمقدمة قصيرة جدًا وانتهِ بخلاصة. ' +
+          'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
+          '{"title":"...","language":"ar","scenes":[{"title":"...","on_screen":"...","narration":"...","duration":8,"example":true}]}. ' +
+          'الموضوع: ' + subject + '
+' +
+          'طلب الطالب: ' + effectiveRequest + '
+
+' +
+          'مادة المحاضرة:
+' + text;
+
+        const parts = [{ text: prompt }];
+        for (const img of images) {
+          if (img && img.mimeType && img.data) {
+            parts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });
+          }
+        }
+
+        const result = await callGemini(env, parts, { maxOutputTokens: 18000 });
+        if (!result || !Array.isArray(result.scenes) || !result.scenes.length) {
+          return jsonResponse({ error: 'Gemini ماطلعش مشاهد فيديو صالحة. جرّب إنشاء الفيديو مرة أخرى.' }, 502);
+        }
+
+        const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();
+        result.title = clean(result.title || 'شرح بالفيديو');
+        result.language = 'ar';
+        result.scenes = result.scenes.slice(0, 10).map((x, i) => {
+          const title = clean(x.title || ('النقطة ' + (i + 1)));
+          const onScreen = clean(x.on_screen || x.title || title);
+          const narration = clean(x.narration || x.explanation || x.voiceover || x.script || onScreen || title);
+          return {
+            title,
+            on_screen: onScreen,
+            narration,
+            duration: Math.max(5, Math.min(12, Number(x.duration) || 8)),
+            example: !!x.example
+          };
+        });
+        return jsonResponse(result);
+      }
+
       // ---- AI video narration audio: real Gemini TTS WAV -----------------
       // Generates one Arabic WAV from the final narration. The browser then
       // combines this audio track with the visual canvas recording.
