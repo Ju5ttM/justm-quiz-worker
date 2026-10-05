@@ -193,7 +193,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '2', video_explain: '3' };
+const PROMPT_VERSIONS = { video_script: '2', video_explain: '4' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -588,13 +588,9 @@ export default {
           'مدة المشهد بين 5 و12 ثانية. ابدأ بمقدمة قصيرة جدًا وانتهِ بخلاصة. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
           '{"title":"...","language":"ar","scenes":[{"title":"...","on_screen":"...","narration":"...","duration":8,"example":true}]}. ' +
-          'الموضوع: ' + subject + '
-' +
-          'طلب الطالب: ' + effectiveRequest + '
-
-' +
-          'مادة المحاضرة:
-' + text;
+          'الموضوع: ' + subject + '\n' +
+          'طلب الطالب: ' + effectiveRequest + '\n\n' +
+          'مادة المحاضرة:\n' + text;
 
         const parts = [{ text: prompt }];
         for (const img of images) {
@@ -604,16 +600,34 @@ export default {
         }
 
         const result = await callGemini(env, parts, { maxOutputTokens: 18000 });
-        if (!result || !Array.isArray(result.scenes) || !result.scenes.length) {
-          return jsonResponse({ error: 'Gemini ماطلعش مشاهد فيديو صالحة. جرّب إنشاء الفيديو مرة أخرى.' }, 502);
-        }
-
         const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();
+        result = result && typeof result === 'object' ? result : {};
         result.title = clean(result.title || 'شرح بالفيديو');
         result.language = 'ar';
-        result.scenes = result.scenes.slice(0, 10).map((x, i) => {
+
+        let rawScenes = Array.isArray(result.scenes) ? result.scenes : [];
+        if (!rawScenes.length) {
+          // Deterministic fallback: even if Gemini returns a partial object,
+          // turn the actual lecture text into readable narration instead of
+          // failing the whole video job.
+          const chunks = String(text || '').split(/(?<=[.!؟:])\s+/).filter(Boolean);
+          const groups = [];
+          for (let i = 0; i < chunks.length; i += Math.max(1, Math.ceil(chunks.length / 6))) {
+            groups.push(chunks.slice(i, i + Math.max(1, Math.ceil(chunks.length / 6))).join(' '));
+          }
+          rawScenes = groups.slice(0, 8).map((chunk, i) => ({
+            title: i === 0 ? 'مقدمة' : ('النقطة ' + (i + 1)),
+            on_screen: chunk.slice(0, 180),
+            narration: chunk,
+            duration: 8,
+            example: false
+          }));
+        }
+
+        result.scenes = rawScenes.slice(0, 10).map((x, i) => {
+          x = x && typeof x === 'object' ? x : {};
           const title = clean(x.title || ('النقطة ' + (i + 1)));
-          const onScreen = clean(x.on_screen || x.title || title);
+          const onScreen = clean(x.on_screen || x.title || x.explanation || title);
           const narration = clean(x.narration || x.explanation || x.voiceover || x.script || onScreen || title);
           return {
             title,
@@ -622,7 +636,11 @@ export default {
             duration: Math.max(5, Math.min(12, Number(x.duration) || 8)),
             example: !!x.example
           };
-        });
+        }).filter(x => x.narration);
+
+        if (!result.scenes.length) {
+          return jsonResponse({ error: 'لم نتمكن من استخراج نص قابل للشرح من المحاضرة. جرّب فتح المحاضرة مرة أخرى.' }, 502);
+        }
         return jsonResponse(result);
       }
 
