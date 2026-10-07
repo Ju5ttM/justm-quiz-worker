@@ -193,7 +193,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '2', video_explain: '7' };
+const PROMPT_VERSIONS = { video_script: '3', video_explain: '8' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -289,14 +289,70 @@ async function deleteGeminiFile(env, name) {
   } catch (e) { /* best effort - files auto-expire after 48h anyway */ }
 }
 
+const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    title: { type: 'STRING' },
+    language: { type: 'STRING' },
+    scenes: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING' },
+          on_screen: { type: 'STRING' },
+          bullets: { type: 'ARRAY', items: { type: 'STRING' } },
+          narration: { type: 'STRING' },
+          duration: { type: 'NUMBER' },
+          kind: { type: 'STRING' },
+          example: { type: 'BOOLEAN' },
+          table: {
+            type: 'OBJECT',
+            properties: {
+              headers: { type: 'ARRAY', items: { type: 'STRING' } },
+              rows: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } }
+            }
+          }
+        },
+        required: ['title', 'on_screen', 'bullets', 'narration', 'duration', 'kind', 'example']
+      }
+    }
+  },
+  required: ['title', 'language', 'scenes']
+};
+
+function extractJsonObject(text) {
+  const cleaned = String(text || '').replace(/```json|```/gi, '').trim();
+  try { return JSON.parse(cleaned); } catch (_) {}
+  // If Gemini wrapped the JSON in a sentence, find the largest balanced object.
+  let start = -1, depth = 0, inString = false, escaped = false, candidate = '';
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) start = i; depth++; }
+    else if (ch === '}' && depth > 0) { depth--; if (depth === 0 && start >= 0) { candidate = cleaned.slice(start, i + 1); try { return JSON.parse(candidate); } catch (_) { start = -1; candidate = ''; } } }
+  }
+  const err = new Error('رد الذكاء الاصطناعي جه بشكل غير مفهوم، جرّب تاني.');
+  err.status = 502;
+  err.rawPreview = cleaned.slice(0, 1200);
+  throw err;
+}
+
 async function callGemini(env, parts, extraConfig) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const config = Object.assign({ responseMimeType: 'application/json' }, extraConfig || {});
   const apiResponse = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: Object.assign({ responseMimeType: 'application/json' }, extraConfig || {}),
+      generationConfig: config,
     }),
   });
 
@@ -322,20 +378,7 @@ async function callGemini(env, parts, extraConfig) {
   const rawText = (data.candidates && data.candidates[0] &&
     data.candidates[0].content && data.candidates[0].content.parts &&
     data.candidates[0].content.parts.map((p) => p.text || '').join('\n')) || '';
-  const cleaned = rawText.replace(/```json|```/g, '').trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch (e) {
-    // tolerate stray text around the JSON object
-    const first = cleaned.indexOf('{');
-    const last = cleaned.lastIndexOf('}');
-    if (first !== -1 && last > first) {
-      try { return JSON.parse(cleaned.slice(first, last + 1)); } catch (e2) { /* fall through */ }
-    }
-    const err = new Error('رد الذكاء الاصطناعي جه بشكل غير مفهوم، جرّب تاني.');
-    err.status = 502;
-    throw err;
-  }
+  return extractJsonObject(rawText);
 }
 
 export default {
@@ -603,7 +646,33 @@ export default {
           }
         }
 
-        let result = await callGemini(env, parts, { maxOutputTokens: 18000 });
+        let result;
+        try {
+          result = await callGemini(env, parts, {
+            maxOutputTokens: 24000,
+            responseMimeType: 'application/json',
+            responseSchema: VIDEO_SCRIPT_RESPONSE_SCHEMA,
+            temperature: 0.2
+          });
+        } catch (firstErr) {
+          // A second, compact retry prevents a transient/truncated JSON response
+          // from turning into a useless 502. The retry explicitly asks for fewer,
+          // denser scenes while preserving all source facts.
+          if (firstErr && firstErr.status === 502) {
+            const retryParts = [{ text: prompt + '\n\nإعادة محاولة تقنية: أخرج JSON صالحًا بالكامل. لا تكتب أي نص خارج JSON. اجعل عدد المشاهد 8-18 فقط، واجعل كل مشهد مركزًا لكن لا تحذف التعريفات أو القوائم أو القوانين أو خطوات الحل. إذا لم توجد أمثلة أو جداول في المصدر فلا تضفها.' }];
+            for (const img of images) {
+              if (img && img.mimeType && img.data) retryParts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });
+            }
+            result = await callGemini(env, retryParts, {
+              maxOutputTokens: 24000,
+              responseMimeType: 'application/json',
+              responseSchema: VIDEO_SCRIPT_RESPONSE_SCHEMA,
+              temperature: 0.1
+            });
+          } else {
+            throw firstErr;
+          }
+        }
         const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();
         result = result && typeof result === 'object' ? result : {};
         result.title = clean(result.title || 'شرح بالفيديو');
@@ -648,12 +717,25 @@ export default {
           const title = clean(x.title || ('النقطة ' + (i + 1)));
           const onScreen = clean(x.on_screen || x.title || x.explanation || title);
           const narration = clean(x.narration || x.explanation || x.voiceover || x.script || onScreen || title);
+          const bullets = Array.isArray(x.bullets) ? x.bullets.map(clean).filter(Boolean).slice(0, 6) : [];
+          const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
+          let table = null;
+          if (x.table && typeof x.table === 'object' && Array.isArray(x.table.headers) && Array.isArray(x.table.rows)) {
+            table = {
+              headers: x.table.headers.map(clean).filter(Boolean).slice(0, 4),
+              rows: x.table.rows.slice(0, 6).map(r => Array.isArray(r) ? r.map(clean).slice(0, 4) : []).filter(r => r.length)
+            };
+            if (!table.headers.length || !table.rows.length) table = null;
+          }
           return {
             title,
             on_screen: onScreen,
+            bullets,
             narration,
-            duration: Math.max(5, Math.min(12, Number(x.duration) || 8)),
-            example: !!x.example
+            duration: Math.max(5, Math.min(16, Number(x.duration) || 8)),
+            kind,
+            example: !!x.example,
+            ...(table ? { table } : {})
           };
         }).filter(x => x.narration);
 
