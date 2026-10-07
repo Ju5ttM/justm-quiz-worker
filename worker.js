@@ -16,9 +16,17 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.6-ai-video-v20';
+const BUILD_VERSION = 'v5.6-ai-video-v20.2.1-practical-download';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+
+// V20.2.1 generated-video download:
+// Set these as Cloudflare Worker Secrets (NOT client-side variables):
+//   CLOUDINARY_CLOUD_NAME
+//   CLOUDINARY_API_KEY
+//   CLOUDINARY_API_SECRET
+// The generated-video upload endpoint verifies a real Firebase user before
+// signing the Cloudinary upload, so the browser never receives the API secret.
 
 // These two identify the Firebase project so this Worker can verify an
 // admin's ID token itself (see verifyOwner below). The project ID is public.
@@ -321,6 +329,7 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
           example: { type: 'BOOLEAN' },
           source_anchor: { type: 'STRING' },
           source_facts: { type: 'ARRAY', items: { type: 'STRING' } },
+          source_image_index: { type: 'NUMBER' },
           table: {
             type: 'OBJECT',
             properties: {
@@ -396,10 +405,49 @@ async function callGemini(env, parts, extraConfig) {
   return extractJsonObject(rawText);
 }
 
+
+async function sha1Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function uploadGeneratedVideoToCloudinary(env, request) {
+  const account = await verifyRealUser(request, env);
+  if (!account) return jsonResponse({ error: 'unauthorized' }, 401);
+  if (!env.CLOUDINARY_CLOUD_NAME || !env.CLOUDINARY_API_KEY || !env.CLOUDINARY_API_SECRET) {
+    return jsonResponse({ error: 'CLOUDINARY generated-video secrets are not configured on the Worker.' }, 503);
+  }
+  const form = await request.formData();
+  const file = form.get('file');
+  const filename = String(form.get('filename') || 'ai-video.webm').slice(0, 180);
+  if (!(file instanceof File)) return jsonResponse({ error: 'file is required' }, 400);
+  if (file.size > 80 * 1024 * 1024) return jsonResponse({ error: 'الفيديو أكبر من الحد المسموح (80MB).' }, 413);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const safeId = ('justm_ai_' + account.uid + '_' + timestamp).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120);
+  const folder = 'justm_ai_videos';
+  const signatureBase = `folder=${folder}&public_id=${safeId}&timestamp=${timestamp}${env.CLOUDINARY_API_SECRET}`;
+  const signature = await sha1Hex(signatureBase);
+  const up = new FormData();
+  up.append('file', file, filename);
+  up.append('api_key', env.CLOUDINARY_API_KEY);
+  up.append('timestamp', String(timestamp));
+  up.append('folder', folder);
+  up.append('public_id', safeId);
+  up.append('signature', signature);
+  const cloud = await fetch(`https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/video/upload`, { method: 'POST', body: up });
+  const data = await cloud.json().catch(() => ({}));
+  if (!cloud.ok || !data.secure_url) return jsonResponse({ error: data.error?.message || `Cloudinary upload failed (${cloud.status})` }, 502);
+  return jsonResponse({ ok: true, secure_url: data.secure_url, bytes: file.size, filename });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
+
+    if (request.headers.get('X-JustM-Action') === 'generated_video_upload') {
+      return uploadGeneratedVideoToCloudinary(env, request);
+    }
 
     let body;
     try { body = await request.json(); }
@@ -627,7 +675,7 @@ export default {
       // ---- AI explainer video script ------------------------------
       if (mode === 'video_explain') {
         const text = String(body.text || '').trim().slice(0, 70000);
-        const images = Array.isArray(body.images) ? body.images.slice(0, 8) : [];
+        const images = Array.isArray(body.images) ? body.images.slice(0, 12) : [];
         const subject = String(body.subject || 'المادة').slice(0, 120);
         const request = String(body.request || '').trim().slice(0, 1200);
         if (!text && !images.length) {
@@ -646,9 +694,9 @@ export default {
           'لا تكتب "مثال عملي" أو example=true إلا إذا كان المصدر نفسه يحتوي فعلًا على مثال أو مسألة أو أرقام أو حالة تطبيقية واضحة. إذا لم يوجد مثال في المصدر، example=false ولا تنشئ مثالًا من عندك. وبالمثل لا تدّعِ وجود جدول إذا لم يوجد جدول. إذا وجد جدول أو مقارنة أو بيانات رقمية في المصدر، انقل البيانات الأساسية إليه في حقل table بدل وصفه بكلام عام. ' +
           'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. حافظ على ترتيب المحاضرة. ' +
           'أنشئ عددًا كافيًا من المشاهد لتغطية المادة دون حشو: من 10 إلى 30 مشهدًا حسب حجم المحتوى. لا تضع أكثر من مفهوم مستقل في مشهد واحد إذا كان ذلك سيؤدي لاختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت، ومدة تقديرية من 6 إلى 16 ثانية. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
-          'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
+          'في أي مشهد عملي يحتوي أرقامًا أو جدولًا أو مسألة، يجب ربطه بصورة صفحة المصدر عبر source_image_index متى كانت الصفحة ضمن الصور المرفقة. لا تضع أي رقم في bullets أو narration إلا إذا كان ظاهرًا في النص أو الصورة. ' + 'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
           'قبل بناء المشاهد نفّذ AI Brain داخليًا: صنّف المادة إلى تعريفات، قوائم/مميزات، قوانين وصيغ، أمثلة/مسائل، جداول/مقارنات، وأفكار نظرية. لا تُنشئ أي فئة إذا لم توجد في المصدر. أعد هذا التحليل أيضًا في حقل brain. ' +
-          'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
+          'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. إذا كان المشهد عمليًا أو يحتوي جدولًا/مسألة/أرقامًا وكان قائمًا على إحدى صور الصفحات المرفقة، أضف source_image_index كرقم الصورة من 0 إلى 11. لا تستخدم source_image_index إذا لم تكن الصورة مفيدة. في المشاهد العملية اعتمد على الصورة والبيانات الأصلية ولا تخترع أرقامًا. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
           'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
           'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
@@ -768,6 +816,7 @@ export default {
             example: !!x.example,
             ...(sourceAnchor ? { source_anchor: sourceAnchor } : {}),
             ...(sourceFacts.length ? { source_facts: sourceFacts } : {}),
+            ...(Number.isFinite(Number(x.source_image_index)) ? { source_image_index: Math.max(0, Math.min(images.length - 1, Number(x.source_image_index))) } : {}),
             ...(table ? { table } : {})
           };
         }).filter(x => x.narration);
@@ -954,25 +1003,24 @@ export default {
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
       } else if (mode === 'video_script') {
         instructions =
-          'You are turning a university lecture into a narrated slideshow script for a student to watch and listen to. ' +
-          'The script must cover BOTH the theory AND the practical part of the lecture. ' +
-          'PART 1 - theory: an intro/overview slide first, then one concept per slide (definitions, rules, classifications, formulas, steps). ' +
-          'PART 2 - practical (MANDATORY whenever the lecture contains any solved examples, exercises, problems, calculations, journal entries, tables of numbers, or case studies): ' +
-          'cover EVERY one of them, in the order they appear. Never skip, merge or summarize them away as just "there are examples". ' +
-          'Give each problem its own slide, or two slides if it is long. For a problem slide: the title starts with "مسألة:" or "مثال:" plus a short name; ' +
-          'the bullets state the given data, then the solution steps with the REAL numbers from the lecture, then the final answer (3 to 6 bullets, each under ~14 words, numbers and formulas kept exactly as in the lecture); ' +
-          'the narration walks through the solution step by step like a teacher at the board, explaining WHY each step is done, using the real numbers (3 to 6 spoken sentences). ' +
-          'If the lecture has no practical part, just cover the theory well and do not invent problems. ' +
-          'Finish with a short wrap-up slide (key points to remember). ' +
-          'Use as many slides as needed to cover everything: normally 8 to 16, and never fewer than the number of concepts plus problems in the lecture. ' +
-          'For theory slides: \"title\" is a short heading (max ~6 words), \"bullets\" are 2-4 short on-screen points (each under ~10 words), ' +
-          'and \"narration\" is what a teacher would SAY out loud — 2-4 full spoken sentences, conversational and clear, NOT just reading the bullets verbatim. ' +
+          'You are an expert university YouTube lecturer creating a FULL, long-form teaching video from the supplied lecture. This is NOT a summary, revision card, or short recap. ' +
+          'Teach the student as if they are watching a high-quality YouTube lesson from beginning to end. Preserve the lecture content and explain it deeply, with natural teacher narration. Do not compress away details just to make the video shorter. ' +
+          'Cover ALL theory in the source: definitions, objectives, characteristics, classifications, rules, formulas, steps, notes, conditions, exceptions, tables, comparisons, and important wording. Keep the order logical and faithful to the lecture. ' +
+          'PART 1 - theory: build enough scenes to actually teach every concept. Each scene should explain the idea in narration, not merely display bullets. ' +
+          'PART 2 - practical (MANDATORY whenever the lecture contains solved examples, exercises, problems, calculations, journal entries, tables of numbers, or case studies): cover EVERY practical item in the order it appears. Never skip, merge, or replace a source problem with a generic summary. ' +
+          'For EVERY source practical item, create a dedicated source-problem scene. First show the same problem/data from the lecture, then explain the solution step by step exactly as the source presents it. The narration must explain WHY each step is done, what rule is being used, and how the numbers lead to the result, like a teacher writing on a board. Keep REAL numbers, formulas, account names, dates, and final answers exactly as found in the lecture. ' +
+          'After each source problem, create a SECOND dedicated scene of kind "similar_example" containing a NEW but closely related practice example created by you using the SAME method. It must be clearly labeled "مثال مشابه للتدريب — من إنشاء AI" so the student never confuses it with the lecture source. Give the new example concrete numbers and a complete step-by-step solution with all intermediate calculations and the final answer. Do not claim the new example came from the lecture. ' +
+          'If the lecture has no practical part, do NOT invent a practical problem merely to fill space. ' +
+          'Do NOT add a final summary/wrap-up slide. The goal is teaching, not summarizing. ' +
+          'Use as many scenes as necessary; there is NO artificial 8-16 scene limit. A long lecture may need 20, 30, 40 or more scenes. Never shorten the lecture just to fit a target count. ' +
+          'For theory scenes: "title" is a clear heading, "bullets" are useful on-screen teaching points, and "narration" is a substantial spoken explanation (normally 4-8 full sentences, and longer when the concept requires it). Do not simply read the bullets. ' +
+          'For practical source scenes use kind "example", "table", or "formula" as appropriate and include source_image_index whenever a source page image contains the practical material. For AI-created practice use kind "similar_example" and source_image_index should be omitted. ' +
+          'Each practical scene should include enough bullets to show data, each solution step, the reason/rule, and final result. Use a field "solution_steps" when useful: [{"step":"...","why":"...","calculation":"..."}]. For similar_example also include "generated_example":true. ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
-          'JSON shape: {\"slides\":[{\"title\":\"...\",\"bullets\":[\"...\",\"...\"],\"narration\":\"...\"}]}. ' +
+          'JSON shape: {"slides":[{"kind":"theory|example|table|formula|similar_example","title":"...","bullets":["..."],"narration":"...","solution_steps":[{"step":"...","why":"...","calculation":"..."}],"generated_example":false,"source_image_index":0}]}. ' +
           'Write in Arabic if the content is in Arabic, otherwise match the source language.\n\n' +
-          `Subject: ${subject}\nTurn this lecture content into the slideshow script` +
-          (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
-
+          `Subject: ${subject}\nTurn this lecture content into the FULL teaching video script` +
+          (images.length ? ' (read the text in the attached scanned pages and use the actual page visuals for practical scenes):' : `:\n\n${trimmedText}`);
       } else if (mode === 'ask') {
         if (!question) return jsonResponse({ error: 'question is required for ask mode' }, 400);
         const dual = body.dual === true;
