@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.6-ai-video-v20.8-visual-teaching-focus';
+const BUILD_VERSION = 'v5.6-ai-video-v20.11-resume-download-totp-fix';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
