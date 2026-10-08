@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.6-ai-video-v20.6-smart-heal-owner-passkey';
+const BUILD_VERSION = 'v5.6-ai-video-v20.8-visual-teaching-focus';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -201,7 +201,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '3', video_explain: '9', video_brain: '1' };
+const PROMPT_VERSIONS = { video_script: '3', video_explain: '10', video_brain: '1' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -330,6 +330,22 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
           source_anchor: { type: 'STRING' },
           source_facts: { type: 'ARRAY', items: { type: 'STRING' } },
           source_image_index: { type: 'NUMBER' },
+          visual_type: { type: 'STRING' },
+          visual_focus: { type: 'STRING' },
+          emphasis: { type: 'ARRAY', items: { type: 'STRING' } },
+          draw_steps: { type: 'ARRAY', items: { type: 'STRING' } },
+          solution_steps: {
+            type: 'ARRAY',
+            items: { type: 'OBJECT', properties: { step: { type: 'STRING' }, why: { type: 'STRING' }, calculation: { type: 'STRING' } } }
+          },
+          diagram: {
+            type: 'OBJECT',
+            properties: {
+              center: { type: 'STRING' },
+              nodes: { type: 'ARRAY', items: { type: 'STRING' } },
+              relations: { type: 'ARRAY', items: { type: 'STRING' } }
+            }
+          },
           table: {
             type: 'OBJECT',
             properties: {
@@ -696,11 +712,14 @@ export default {
           'أنشئ عددًا كافيًا من المشاهد لتغطية المادة دون حشو: من 10 إلى 30 مشهدًا حسب حجم المحتوى. لا تضع أكثر من مفهوم مستقل في مشهد واحد إذا كان ذلك سيؤدي لاختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت، ومدة تقديرية من 6 إلى 16 ثانية. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
           'في أي مشهد عملي يحتوي أرقامًا أو جدولًا أو مسألة، يجب ربطه بصورة صفحة المصدر عبر source_image_index متى كانت الصفحة ضمن الصور المرفقة. لا تضع أي رقم في bullets أو narration إلا إذا كان ظاهرًا في النص أو الصورة. ' + 'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
           'قبل بناء المشاهد نفّذ AI Brain داخليًا: صنّف المادة إلى تعريفات، قوائم/مميزات، قوانين وصيغ، أمثلة/مسائل، جداول/مقارنات، وأفكار نظرية. لا تُنشئ أي فئة إذا لم توجد في المصدر. أعد هذا التحليل أيضًا في حقل brain. ' +
+          'مهم جدًا: لا تكتفِ بكتابة نص على الشاشة. صمّم كل مشهد كشرح بصري تفاعلي بأسلوب دفتر/سبورة ذكية مستوحى من فكرة Notebook التعليمية، لكن بهوية JustM وتصميم مستقل. لكل مشهد اختر visual_type واحدًا من: card أو steps أو flow أو compare أو formula أو worked_example أو concept_map أو timeline أو table أو source_image أو focus. اختر النوع بناءً على طبيعة المعلومة، وليس عشوائيًا. استخدم card للتعريفات، steps للخطوات، flow للعلاقات، compare للمقارنات، formula للقوانين، worked_example للمسائل، concept_map للمفاهيم المترابطة، timeline للتسلسل الزمني، table للجداول الحقيقية، source_image عندما تكون صورة المصدر هي أفضل وسيلة، وfocus عندما تكون هناك فكرة واحدة يجب إبرازها. لا تستخدم نفس النوع لكل المشاهد المتتالية إذا كان هناك بديل أفضل. ' +
+          'لكل مشهد أضف visual_focus كجملة قصيرة تحدد بالضبط ما يجب أن تركز عليه عين الطالب في هذه اللحظة. وأضف emphasis ككلمات أو عبارات قصيرة مهمة من المصدر، وdraw_steps كمراحل قصيرة للرسم/البناء البصري إذا كان visual_type يحتاج بناءً تدريجيًا. يمكن إضافة diagram بالشكل {center,nodes:[...],relations:[...]} فقط عندما توجد علاقة مفاهيم حقيقية. لا تخترع علاقات غير موجودة في المصدر. الهدف أن تظهر المعلومة تدريجيًا مع الصوت: لا تعرض كل شيء من البداية. ' +
+          'في المشاهد العملية أو المسائل استخدم solution_steps عند توفر حل واضح، بالشكل [{step,why,calculation}]، بحيث يظهر الحل مرحلة مرحلة ويعرف الطالب لماذا انتقلنا لكل خطوة. لا تملأ هذا الحقل في المشاهد النظرية العادية. ' +
           'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. إذا كان المشهد عمليًا أو يحتوي جدولًا/مسألة/أرقامًا وكان قائمًا على إحدى صور الصفحات المرفقة، أضف source_image_index كرقم الصورة من 0 إلى 11. لا تستخدم source_image_index إذا لم تكن الصورة مفيدة. في المشاهد العملية اعتمد على الصورة والبيانات الأصلية ولا تخترع أرقامًا. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
           'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
           'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
-          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
+          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
           'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
@@ -798,6 +817,19 @@ export default {
           const sourceAnchor = clean(x.source_anchor || '');
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
           const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
+          const allowedVisuals = ['card','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
+          const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
+          const visualFocus = clean(x.visual_focus || x.title || '');
+          const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
+          const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0,8) : [];
+          const solutionSteps = Array.isArray(x.solution_steps) ? x.solution_steps.slice(0,8).map((z) => ({ step: clean(z?.step || ''), why: clean(z?.why || ''), calculation: clean(z?.calculation || '') })).filter((z) => z.step || z.why || z.calculation) : [];
+          let diagram = null;
+          if (x.diagram && typeof x.diagram === 'object') {
+            const center = clean(x.diagram.center || '');
+            const nodes = Array.isArray(x.diagram.nodes) ? x.diagram.nodes.map(clean).filter(Boolean).slice(0,8) : [];
+            const relations = Array.isArray(x.diagram.relations) ? x.diagram.relations.map(clean).filter(Boolean).slice(0,8) : [];
+            if (center || nodes.length) diagram = { center, nodes, relations };
+          }
           let table = null;
           if (x.table && typeof x.table === 'object' && Array.isArray(x.table.headers) && Array.isArray(x.table.rows)) {
             table = {
@@ -813,6 +845,12 @@ export default {
             narration,
             duration: Math.max(5, Math.min(16, Number(x.duration) || 8)),
             kind,
+            visual_type: visualType,
+            ...(visualFocus ? { visual_focus: visualFocus } : {}),
+            ...(emphasis.length ? { emphasis } : {}),
+            ...(drawSteps.length ? { draw_steps: drawSteps } : {}),
+            ...(solutionSteps.length ? { solution_steps: solutionSteps } : {}),
+            ...(diagram ? { diagram } : {}),
             example: !!x.example,
             ...(sourceAnchor ? { source_anchor: sourceAnchor } : {}),
             ...(sourceFacts.length ? { source_facts: sourceFacts } : {}),
