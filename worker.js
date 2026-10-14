@@ -125,7 +125,7 @@ function corsHeaders() {
     // Authorization is needed for the owner-only calls (get_ai_log, get_banned,
     // ban_user, unban_user): without it the browser's CORS preflight rejects the
     // request and the site just shows "Failed to fetch".
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-JustM-Action',
   };
 }
 
@@ -201,7 +201,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '3', video_explain: '10', video_brain: '1' };
+const PROMPT_VERSIONS = { video_script: '3', video_explain: '11', video_brain: '1' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -437,7 +437,7 @@ async function uploadGeneratedVideoToCloudinary(env, request) {
   const file = form.get('file');
   const filename = String(form.get('filename') || 'ai-video.webm').slice(0, 180);
   if (!(file instanceof File)) return jsonResponse({ error: 'file is required' }, 400);
-  if (file.size > 80 * 1024 * 1024) return jsonResponse({ error: 'الفيديو أكبر من الحد المسموح (80MB).' }, 413);
+  if (file.size > 100 * 1024 * 1024) return jsonResponse({ error: 'الفيديو أكبر من الحد المسموح (100MB).' }, 413);
   const timestamp = Math.floor(Date.now() / 1000);
   const safeId = ('justm_ai_' + account.uid + '_' + timestamp).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120);
   const folder = 'justm_ai_videos';
@@ -693,12 +693,19 @@ export default {
         const text = String(body.text || '').trim().slice(0, 70000);
         const images = Array.isArray(body.images) ? body.images.slice(0, 12) : [];
         const subject = String(body.subject || 'المادة').slice(0, 120);
-        const request = String(body.request || '').trim().slice(0, 1200);
+        const request = String(body.request || '').trim().slice(0, 3000);
         if (!text && !images.length) {
           return jsonResponse({ error: 'محتوى المحاضرة مطلوب' }, 400);
         }
         const effectiveRequest = request || 'اشرح المحاضرة كاملة من البداية للنهاية، مع الحفاظ على ترتيب الأفكار وعدم إسقاط النقاط الأساسية.';
 
+        const explainMode = ['theory', 'intensive', 'comprehensive'].includes(body.explain_mode) ? body.explain_mode : '';
+        const MODE_LENGTH = {
+          theory: 'من 8 إلى 24 مشهدًا، مدة كل مشهد 10-20 ثانية، سرد كل مشهد 70-110 كلمة، شرح هادئ للمفاهيم والتعريفات',
+          intensive: 'من 14 إلى 30 مشهدًا قصيرًا، مدة كل مشهد 5-10 ثواني، سرد كل مشهد 30-60 كلمة فقط، أسلوب سريع ومباشر، والأولوية للقوانين والأرقام وخطوات الحل بأقل نظري ممكن',
+          comprehensive: 'لا يقل عن 12 مشهدًا ويصل إلى 30، مدة كل مشهد 20-45 ثانية، سرد كل مشهد لا يقل عن 120 كلمة ويصل إلى 250، ممنوع التلخيص نهائيًا، وغطِّ كل صفحة وفقرة ومثال بالتفصيل كأنه شرح مدرس على يوتيوب'
+        };
+        const modeRules = explainMode ? ('قواعد الطول الخاصة بالنمط المختار، وهي تلغي أي نطاق سابق لعدد المشاهد أو مدتها أو طول السرد: ' + MODE_LENGTH[explainMode] + '. ') : '';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -721,7 +728,7 @@ export default {
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
           '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
-          'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
+          modeRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
 
         const parts = [{ text: prompt }];
@@ -734,7 +741,7 @@ export default {
         let result;
         try {
           result = await callGemini(env, parts, {
-            maxOutputTokens: 24000,
+            maxOutputTokens: 48000,
             responseMimeType: 'application/json',
             responseSchema: VIDEO_SCRIPT_RESPONSE_SCHEMA,
             temperature: 0.2
@@ -808,7 +815,7 @@ export default {
           }
         }
 
-        result.scenes = rawScenes.slice(0, 24).map((x, i) => {
+        result.scenes = rawScenes.slice(0, 30).map((x, i) => {
           x = x && typeof x === 'object' ? x : {};
           const title = clean(x.title || ('النقطة ' + (i + 1)));
           const onScreen = clean(x.on_screen || x.title || x.explanation || title);
@@ -843,7 +850,7 @@ export default {
             on_screen: onScreen,
             bullets,
             narration,
-            duration: Math.max(5, Math.min(16, Number(x.duration) || 8)),
+            duration: Math.max(5, Math.min(60, Number(x.duration) || 8)),
             kind,
             visual_type: visualType,
             ...(visualFocus ? { visual_focus: visualFocus } : {}),
