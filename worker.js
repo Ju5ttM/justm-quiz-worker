@@ -706,6 +706,8 @@ export default {
           comprehensive: 'لا يقل عن 12 مشهدًا ويصل إلى 30، مدة كل مشهد 20-45 ثانية، سرد كل مشهد لا يقل عن 120 كلمة ويصل إلى 250، ممنوع التلخيص نهائيًا، وغطِّ كل صفحة وفقرة ومثال بالتفصيل كأنه شرح مدرس على يوتيوب'
         };
         const modeRules = explainMode ? ('قواعد الطول الخاصة بالنمط المختار، وهي تلغي أي نطاق سابق لعدد المشاهد أو مدتها أو طول السرد: ' + MODE_LENGTH[explainMode] + '. ') : '';
+        const partTotal = Math.max(1, Math.min(8, parseInt(body.part_total, 10) || 1));
+        const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: عدد المشاهد لهذه الدفعة فقط من 3 إلى 8 (يلغي أي عدد مشاهد مذكور سابقًا)، مع الالتزام بمدة المشهد وطول السرد المطلوبين. ') : '';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -728,7 +730,7 @@ export default {
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
           '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
-          modeRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
+          modeRules + partRule + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
 
         const parts = [{ text: prompt }];
