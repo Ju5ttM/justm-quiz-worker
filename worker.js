@@ -441,19 +441,22 @@ async function uploadGeneratedVideoToCloudinary(env, request) {
   const timestamp = Math.floor(Date.now() / 1000);
   const safeId = ('justm_ai_' + account.uid + '_' + timestamp).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120);
   const folder = 'justm_ai_videos';
-  const signatureBase = `folder=${folder}&public_id=${safeId}&timestamp=${timestamp}${env.CLOUDINARY_API_SECRET}`;
+  const eager = 'f_mp4,vc_h264,ac_aac';
+  const signatureBase = `eager=${eager}&folder=${folder}&public_id=${safeId}&timestamp=${timestamp}${env.CLOUDINARY_API_SECRET}`;
   const signature = await sha1Hex(signatureBase);
   const up = new FormData();
   up.append('file', file, filename);
   up.append('api_key', env.CLOUDINARY_API_KEY);
   up.append('timestamp', String(timestamp));
+  up.append('eager', eager);
   up.append('folder', folder);
   up.append('public_id', safeId);
   up.append('signature', signature);
   const cloud = await fetch(`https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/video/upload`, { method: 'POST', body: up });
   const data = await cloud.json().catch(() => ({}));
   if (!cloud.ok || !data.secure_url) return jsonResponse({ error: data.error?.message || `Cloudinary upload failed (${cloud.status})` }, 502);
-  return jsonResponse({ ok: true, secure_url: data.secure_url, bytes: file.size, filename });
+  const eagerUrl = data.eager && data.eager[0] && data.eager[0].secure_url;
+  return jsonResponse({ ok: true, secure_url: eagerUrl || data.secure_url, converted: !!eagerUrl, bytes: file.size, filename });
 }
 
 export default {
