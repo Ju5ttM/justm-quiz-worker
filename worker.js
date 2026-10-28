@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.6-ai-video-v20.13-all-roles-auth-theory-duration';
+const BUILD_VERSION = 'v5.7-ai-video-public-visual-accuracy-notif-fallback';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -201,7 +201,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '3', video_explain: '11', video_brain: '1' };
+const PROMPT_VERSIONS = { video_script: '5', video_explain: '13', video_brain: '3' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -529,17 +529,8 @@ export default {
       // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-      // AI explainer-video generation is available to all signed-in JustM users
-      // (owner, admin, and student), not owner-only. Verify that the Firebase ID
-      // token is genuine, but deliberately do not require an admin_accounts role.
-      // This protects the paid/quota-consuming endpoints from anonymous HTTP calls
-      // while preserving the intended all-roles product behavior.
-      if (mode === 'video_explain' || mode === 'video_tts') {
-        const videoUser = await verifyRealUser(request, env);
-        if (!videoUser) {
-          return jsonResponse({ error: 'لازم تسجل دخول بحسابك في JustM لاستخدام إنشاء الفيديو.' }, 401);
-        }
-      }
+      // video_explain/video_tts accept anonymous device identity too; owner-only
+      // operations below still require verifyOwner. Rate limiting remains active.
 
       const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
@@ -754,6 +745,7 @@ export default {
           'لكل مشهد أضف visual_focus كجملة قصيرة تحدد بالضبط ما يجب أن تركز عليه عين الطالب في هذه اللحظة. وأضف emphasis ككلمات أو عبارات قصيرة مهمة من المصدر، وdraw_steps كمراحل قصيرة للرسم/البناء البصري إذا كان visual_type يحتاج بناءً تدريجيًا. يمكن إضافة diagram بالشكل {center,nodes:[...],relations:[...]} فقط عندما توجد علاقة مفاهيم حقيقية. لا تخترع علاقات غير موجودة في المصدر. الهدف أن تظهر المعلومة تدريجيًا مع الصوت: لا تعرض كل شيء من البداية. ' +
           'في المشاهد العملية أو المسائل استخدم solution_steps عند توفر حل واضح، بالشكل [{step,why,calculation}]، بحيث يظهر الحل مرحلة مرحلة ويعرف الطالب لماذا انتقلنا لكل خطوة. لا تملأ هذا الحقل في المشاهد النظرية العادية. ' +
           'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. إذا كان المشهد عمليًا أو يحتوي جدولًا/مسألة/أرقامًا وكان قائمًا على إحدى صور الصفحات المرفقة، أضف source_image_index كرقم الصورة من 0 إلى 11. لا تستخدم source_image_index إذا لم تكن الصورة مفيدة. في المشاهد العملية اعتمد على الصورة والبيانات الأصلية ولا تخترع أرقامًا. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
+          'دقة الرسم البصري إلزامية: لا تنشئ مخطط أسهم أو خريطة مفاهيم إلا إذا كانت العلاقات والاتجاهات مذكورة صراحة في المصدر؛ لا تستنتج علاقة من مجرد وجود المصطلحات معًا. إذا لم تكن العلاقات واضحة فاستخدم card أو steps بدل flow/concept_map. لا تنشئ رسومات أو جداول أو أرقامًا توضيحية من عندك. عند استخدام صورة مصدر، يجب أن تكون الصفحة التي تحتوي المعلومة نفسها، ولا تربط مشهدًا بصورة غير مرتبطة. راجع كل عنوان ونقطة وسهم ورقم مع المصدر قبل إخراج JSON. ' +
           'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
           'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
@@ -1079,17 +1071,15 @@ export default {
           (images.length ? ' (read the text in the attached scanned pages):' : `:\n\n${trimmedText}`);
       } else if (mode === 'video_script') {
         instructions =
-          'You are an expert university YouTube lecturer creating a FULL, long-form teaching video from the supplied lecture. This is NOT a summary, revision card, or short recap. ' +
-          'Teach the student as if they are watching a high-quality YouTube lesson from beginning to end. Preserve the lecture content and explain it deeply, with natural teacher narration. Do not compress away details just to make the video shorter. ' +
-          'Cover ALL theory in the source: definitions, objectives, characteristics, classifications, rules, formulas, steps, notes, conditions, exceptions, tables, comparisons, and important wording. Keep the order logical and faithful to the lecture. ' +
-          'PART 1 - theory: build enough scenes to actually teach every concept. Each scene should explain the idea in narration, not merely display bullets. ' +
-          'PART 2 - practical (MANDATORY whenever the lecture contains solved examples, exercises, problems, calculations, journal entries, tables of numbers, or case studies): cover EVERY practical item in the order it appears. Never skip, merge, or replace a source problem with a generic summary. ' +
-          'For EVERY source practical item, create a dedicated source-problem scene. First show the same problem/data from the lecture, then explain the solution step by step exactly as the source presents it. The narration must explain WHY each step is done, what rule is being used, and how the numbers lead to the result, like a teacher writing on a board. Keep REAL numbers, formulas, account names, dates, and final answers exactly as found in the lecture. ' +
-          'After each source problem, create a SECOND dedicated scene of kind "similar_example" containing a NEW but closely related practice example created by you using the SAME method. It must be clearly labeled "مثال مشابه للتدريب — من إنشاء AI" so the student never confuses it with the lecture source. Give the new example concrete numbers and a complete step-by-step solution with all intermediate calculations and the final answer. Do not claim the new example came from the lecture. ' +
-          'If the lecture has no practical part, do NOT invent a practical problem merely to fill space. ' +
-          'Do NOT add a final summary/wrap-up slide. The goal is teaching, not summarizing. ' +
-          'Use as many scenes as necessary; there is NO artificial 8-16 scene limit. A long lecture may need 20, 30, 40 or more scenes. Never shorten the lecture just to fit a target count. ' +
-          'For theory scenes: "title" is a clear heading, "bullets" are useful on-screen teaching points, and "narration" is a substantial spoken explanation (normally 4-8 full sentences, and longer when the concept requires it). Do not simply read the bullets. ' +
+          'You are an expert Arabic university lecturer creating a visually clear explainer video from the supplied lecture, in the style of a polished educational infographic: clear heading, organized cards, relevant icons, arrows only when the source supports a relationship, and readable concise on-screen text. ' +
+          'Before planning scenes, inspect the full page count, text density, difficulty, and the number and variety of practical questions. Estimate a realistic duration from the amount of teaching actually needed. There is NO fixed target duration and NO universal 8-minute cap: short/simple files should produce short videos, while long, dense, or difficult files must receive enough time for complete teaching even if the video exceeds 8 minutes. Never pad a short video and never rush or omit content to meet a time target. ' +
+          'Teach the supplied file faithfully and comprehensively. Explain every distinct concept, definition, objective, characteristic, classification, rule, formula, note, comparison, and meaningful exception in the source. Do NOT summarize in place of teaching, do NOT omit important details to shorten the video, and do NOT add a recap/summary scene unless the source itself requires one. Avoid only redundant repetition. Never invent facts, labels, numbers, categories, or relationships not supported by the source. If a detail is unclear or missing, say so or leave it out. ' +
+          'PART 1 - theory: cover all meaningful theory from the file in coherent, well-paced visual infographic scenes. Use clear headings, organized cards, readable concise on-screen text, relevant icons, tables, and diagrams only where the source supports the relationship. Narration should teach the idea, not merely read bullets. ' +
+          'PART 2 - practical (MANDATORY whenever the lecture contains solved examples, exercises, problems, calculations, journal entries, numerical tables, or case studies): inspect every practical item in source order and identify which ones test genuinely different methods, rules, or cases. Teach every distinct method and every meaningful variation. When several questions are essentially the same pattern and use the same steps, solve at least two representative questions in detail (prefer a straightforward one and a meaningfully varied one) and do not spend equal time repeating the identical procedure for every duplicate. Do not skip a question if it introduces a new rule, exception, data interpretation, or solution step. Explicitly indicate which repeated pattern is being demonstrated, without pretending that an unshown question was solved. ' +
+          'For each selected/unique source problem, show the actual question and data from the lecture, then teach the solution step by step. Explain WHY each step is done, which rule is used, and how the numbers lead to the result, like a teacher writing on a board. Preserve source numbers, formulas, account names, dates, units, and final answers exactly. Do not replace a source problem with a generic summary. ' +
+          'Do not add invented examples merely to fill time. An extra AI-created practice example is allowed only when it teaches a distinct useful variation that is not covered by source questions; label it clearly "مثال تدريبي إضافي من إنشاء AI" and never imply it came from the file. If the lecture has no practical part, do NOT invent one. ' +
+          'Set scene count and narration length according to content complexity, not a preset slide count or duration ceiling. Keep closely related theory points together when that improves understanding, but give complex ideas and multi-step solutions enough screen time and separate scenes for legibility. The total duration is an estimate, not a constraint: prioritize complete, accurate teaching over hitting a number of minutes. ' +
+          'For theory scenes: use a clear heading, 2-5 concise on-screen points, a meaningful visual metaphor/icon, and natural explanatory narration of sufficient depth for the concept. Do not simply read the bullets. Diagrams and arrows are allowed only when the relationship is explicit in the source. ' +
           'For practical source scenes use kind "example", "table", or "formula" as appropriate and include source_image_index whenever a source page image contains the practical material. For AI-created practice use kind "similar_example" and source_image_index should be omitted. ' +
           'Each practical scene should include enough bullets to show data, each solution step, the reason/rule, and final result. Use a field "solution_steps" when useful: [{"step":"...","why":"...","calculation":"..."}]. For similar_example also include "generated_example":true. ' +
           'Respond with ONLY valid JSON, no markdown fences, no commentary. ' +
