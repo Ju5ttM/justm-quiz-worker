@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v5.6-ai-video-v20.11-resume-download-totp-fix';
+const BUILD_VERSION = 'v5.6-ai-video-v20.13-all-roles-auth-theory-duration';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -529,6 +529,18 @@ export default {
       // ---- admin: AI usage log + ban list ----
       const requestIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
+      // AI explainer-video generation is available to all signed-in JustM users
+      // (owner, admin, and student), not owner-only. Verify that the Firebase ID
+      // token is genuine, but deliberately do not require an admin_accounts role.
+      // This protects the paid/quota-consuming endpoints from anonymous HTTP calls
+      // while preserving the intended all-roles product behavior.
+      if (mode === 'video_explain' || mode === 'video_tts') {
+        const videoUser = await verifyRealUser(request, env);
+        if (!videoUser) {
+          return jsonResponse({ error: 'لازم تسجل دخول بحسابك في JustM لاستخدام إنشاء الفيديو.' }, 401);
+        }
+      }
+
       const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
@@ -540,7 +552,7 @@ export default {
         }
       }
 
-      // ---- owner: ONE course video -> study notes, in 3 short steps so the app
+      // ---- owner-only: analyze a course's existing hosted video -> study notes, in 3 short steps so the app
       // can show real progress and no single request has to stay open for minutes:
       //   video_start    : read the video, hand it to Gemini (or return cached notes)
       //   video_poll     : is Gemini done processing the file?
@@ -626,7 +638,7 @@ export default {
         }
       }
 
-      // ---- owner: merge every video's notes into ONE level-wide summary ----
+      // ---- owner-only: merge every course video's notes into ONE level-wide summary ----
       if (mode === 'course_level_summary') {
         const items = Array.isArray(body.notes) ? body.notes : [];
         const courseName = String(body.course_name || 'الكورس').slice(0, 100);
@@ -716,13 +728,15 @@ export default {
 
         const explainMode = ['theory', 'intensive', 'comprehensive'].includes(body.explain_mode) ? body.explain_mode : '';
         const MODE_LENGTH = {
-          theory: 'من 8 إلى 24 مشهدًا، مدة كل مشهد 10-20 ثانية، سرد كل مشهد 70-110 كلمة، شرح هادئ للمفاهيم والتعريفات',
-          intensive: 'من 14 إلى 30 مشهدًا قصيرًا، مدة كل مشهد 5-10 ثواني، سرد كل مشهد 30-60 كلمة فقط، أسلوب سريع ومباشر، والأولوية للقوانين والأرقام وخطوات الحل بأقل نظري ممكن',
-          comprehensive: 'لا يقل عن 12 مشهدًا ويصل إلى 30، مدة كل مشهد 20-45 ثانية، سرد كل مشهد لا يقل عن 120 كلمة ويصل إلى 250، ممنوع التلخيص نهائيًا، وغطِّ كل صفحة وفقرة ومثال بالتفصيل كأنه شرح مدرس على يوتيوب'
+          theory: 'اجعل الفيديو النظري لهذا الجزء كله نحو دقيقة إلى دقيقتين إجمالًا (150 إلى 300 كلمة تقريبًا موزعة على مشهدين أو ثلاثة). اجعل كل مشهد 50 إلى 110 كلمات، واشرح الفكرة والتعريف والأهمية بوضوح من المصدر. اجمع النقاط المتقاربة، واحذف الحشو والتكرار، ولا تسقط الفكرة الأساسية.',
+          intensive: 'سرد كل مشهد من 60 إلى 110 كلمة، أسلوب سريع ومباشر، والأولوية للقوانين والأرقام وخطوات الحل',
+          comprehensive: 'شرح تفصيلي بدون أي تلخيص، زي NotebookLM، وحدد طول كل نقطة حسب صعوبتها بنفسك. (أ) نظري بسيط وكلام واضح: اشرحه زي ما هو في الملف مع توضيح بسيط لأي حاجة مش مفهومة، من 100 إلى 200 كلمة. (ب) عملي مباشر مبني على تعويض وجمع وطرح (زي قائمة الدخل): اذكر القانون بالكلام ثم عوّض بالأرقام الفعلية بندًا بندًا ثم الناتج، مثل: صافي إيراد المبيعات = المبيعات − الخصومات − المردودات = 3,600,000 − 24,000 − 76,000 = 3,500,000. من 150 إلى 300 كلمة (دقيقة إلى دقيقتين) من غير حشو ومن غير تلخيص. (ج) فكرة كبيرة فيها قوانين كتيرة وتحتاج تفكير: اشرحها بالتفصيل وحل الأمثلة خطوة خطوة، من 400 إلى 600 كلمة كحد أقصى (من 3 إلى 4 دقائق)، ولا تطوّل أكتر من كده. أهم حاجة الدقة: راجع كل عملية حسابية قبل ما تكتبها، واستخدم أرقام الملف نفسها، والكتابة على الشاشة تتنقل من الملف بأرقامه ومصطلحاته بدون تحريف.'
         };
         const modeRules = explainMode ? ('قواعد الطول الخاصة بالنمط المختار، وهي تلغي أي نطاق سابق لعدد المشاهد أو مدتها أو طول السرد: ' + MODE_LENGTH[explainMode] + '. ') : '';
         const partTotal = Math.max(1, Math.min(8, parseInt(body.part_total, 10) || 1));
-        const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: عدد المشاهد لهذه الدفعة فقط من 3 إلى 8 (يلغي أي عدد مشاهد مذكور سابقًا)، مع الالتزام بمدة المشهد وطول السرد المطلوبين. ') : '';
+        const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
+        const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
+        const styleRules = 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -733,7 +747,7 @@ export default {
           'ممنوع تمامًا تحويل المحتوى إلى كلام عام مثل "ملخص سريع" أو "من أهم النقاط" بدل شرح المادة نفسها. التعريفات يجب نقل معناها كاملًا، ومميزات/خصائص أي مفهوم يجب ذكرها نقطة نقطة كما وردت في المصدر، ولا تختزل قائمة من عدة نقاط إلى جملة واحدة. ' +
           'لا تكتب "مثال عملي" أو example=true إلا إذا كان المصدر نفسه يحتوي فعلًا على مثال أو مسألة أو أرقام أو حالة تطبيقية واضحة. إذا لم يوجد مثال في المصدر، example=false ولا تنشئ مثالًا من عندك. وبالمثل لا تدّعِ وجود جدول إذا لم يوجد جدول. إذا وجد جدول أو مقارنة أو بيانات رقمية في المصدر، انقل البيانات الأساسية إليه في حقل table بدل وصفه بكلام عام. ' +
           'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. حافظ على ترتيب المحاضرة. ' +
-          'أنشئ عددًا كافيًا من المشاهد لتغطية المادة دون حشو: من 10 إلى 30 مشهدًا حسب حجم المحتوى. لا تضع أكثر من مفهوم مستقل في مشهد واحد إذا كان ذلك سيؤدي لاختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت، ومدة تقديرية من 6 إلى 16 ثانية. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
+          'أنشئ العدد المحدد من المشاهد في قواعد النمط والطلب أدناه (وإن لم يُحدد عدد فمن 10 إلى 30 حسب حجم المحتوى). يمكن للمشهد الواحد أن يغطي عدة مفاهيم مترابطة طالما لا يتم اختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت بالطول المحدد في قواعد النمط، ومدة تقديرية بالثواني = عدد كلمات السرد ÷ 2.5. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
           'في أي مشهد عملي يحتوي أرقامًا أو جدولًا أو مسألة، يجب ربطه بصورة صفحة المصدر عبر source_image_index متى كانت الصفحة ضمن الصور المرفقة. لا تضع أي رقم في bullets أو narration إلا إذا كان ظاهرًا في النص أو الصورة. ' + 'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
           'قبل بناء المشاهد نفّذ AI Brain داخليًا: صنّف المادة إلى تعريفات، قوائم/مميزات، قوانين وصيغ، أمثلة/مسائل، جداول/مقارنات، وأفكار نظرية. لا تُنشئ أي فئة إذا لم توجد في المصدر. أعد هذا التحليل أيضًا في حقل brain. ' +
           'مهم جدًا: لا تكتفِ بكتابة نص على الشاشة. صمّم كل مشهد كشرح بصري تفاعلي بأسلوب دفتر/سبورة ذكية مستوحى من فكرة Notebook التعليمية، لكن بهوية JustM وتصميم مستقل. لكل مشهد اختر visual_type واحدًا من: card أو steps أو flow أو compare أو formula أو worked_example أو concept_map أو timeline أو table أو source_image أو focus. اختر النوع بناءً على طبيعة المعلومة، وليس عشوائيًا. استخدم card للتعريفات، steps للخطوات، flow للعلاقات، compare للمقارنات، formula للقوانين، worked_example للمسائل، concept_map للمفاهيم المترابطة، timeline للتسلسل الزمني، table للجداول الحقيقية، source_image عندما تكون صورة المصدر هي أفضل وسيلة، وfocus عندما تكون هناك فكرة واحدة يجب إبرازها. لا تستخدم نفس النوع لكل المشاهد المتتالية إذا كان هناك بديل أفضل. ' +
@@ -745,7 +759,7 @@ export default {
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
           '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
-          modeRules + partRule + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
+          modeRules + partRule + styleRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
 
         const parts = [{ text: prompt }];
@@ -841,7 +855,7 @@ export default {
           const sourceAnchor = clean(x.source_anchor || '');
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
           const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
-          const allowedVisuals = ['card','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
+          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
           const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
           const visualFocus = clean(x.visual_focus || x.title || '');
           const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
@@ -867,7 +881,7 @@ export default {
             on_screen: onScreen,
             bullets,
             narration,
-            duration: Math.max(5, Math.min(60, Number(x.duration) || 8)),
+            duration: Math.max(5, Math.min(300, Number(x.duration) || 8)),
             kind,
             visual_type: visualType,
             ...(visualFocus ? { visual_focus: visualFocus } : {}),
