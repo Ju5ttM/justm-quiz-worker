@@ -387,19 +387,52 @@ function extractJsonObject(text) {
 async function callGemini(env, parts, extraConfig) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const config = Object.assign({ responseMimeType: 'application/json' }, extraConfig || {});
-  const apiResponse = await fetch(apiUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts }],
-      generationConfig: config,
-    }),
+  const requestBody = JSON.stringify({
+    contents: [{ role: 'user', parts }],
+    generationConfig: config,
   });
 
-  if (!apiResponse.ok) {
-    const errText = await apiResponse.text();
-    const err = new Error('Gemini API error: ' + errText);
-    err.status = apiResponse.status;
+  // Gemini/edge 502/503/504/524 errors are often transient. Retry a small,
+  // bounded number of times before returning control to the saved video job.
+  // Do not retry permanent 4xx errors (except temporary rate limiting).
+  let apiResponse = null;
+  let lastTransientStatus = 0;
+  const maxAttempts = 2; // initial attempt + one retry, to avoid duplicate long generations
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      apiResponse = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+        body: requestBody,
+      });
+    } catch (networkError) {
+      if (attempt + 1 >= maxAttempts) {
+        throw Object.assign(new Error('تعذّر الاتصال بخدمة Gemini مؤقتًا. التقدم المحفوظ آمن؛ اضغط «استكمال» بعد قليل.'), { status: 503 });
+      }
+      await new Promise(resolve => setTimeout(resolve, 900));
+      continue;
+    }
+    if (apiResponse.ok) break;
+    lastTransientStatus = apiResponse.status;
+    const retryable = [429, 500, 502, 503, 504, 524].includes(apiResponse.status);
+    if (!retryable || attempt + 1 >= maxAttempts) break;
+    // Consume body before retrying so the response connection can be released.
+    try { await apiResponse.text(); } catch (_) {}
+    await new Promise(resolve => setTimeout(resolve, apiResponse.status === 429 ? 1400 : 900));
+  }
+
+  if (!apiResponse || !apiResponse.ok) {
+    const status = apiResponse ? apiResponse.status : lastTransientStatus;
+    let errText = '';
+    try { errText = apiResponse ? await apiResponse.text() : ''; } catch (_) {}
+    if (status === 524 || status === 504 || status === 502 || status === 503) {
+      const err = new Error('خدمة Gemini اتأخرت أو انتهت مهلة الاتصال (HTTP ' + status + '). التقدم محفوظ؛ انتظر قليلًا ثم اضغط «استكمال» لإعادة المحاولة من المرحلة المتوقفة.');
+      err.status = 503;
+      err.upstreamStatus = status;
+      throw err;
+    }
+    const err = new Error('Gemini API error: ' + (errText || ('HTTP ' + status)));
+    err.status = status || 502;
     throw err;
   }
 
