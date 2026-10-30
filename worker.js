@@ -879,7 +879,7 @@ export default {
           const bullets = Array.isArray(x.bullets) ? x.bullets.map(clean).filter(Boolean).slice(0, 6) : [];
           const sourceAnchor = clean(x.source_anchor || '');
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
-          const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
+          let kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
           const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
           let visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
           const visualFocus = clean(x.visual_focus || x.title || '');
