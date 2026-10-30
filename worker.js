@@ -201,7 +201,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '5', video_explain: '13', video_brain: '3' };
+const PROMPT_VERSIONS = { video_script: '5', video_explain: '14', video_brain: '3' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -760,7 +760,7 @@ export default {
         const partTotal = Math.max(1, Math.min(8, parseInt(body.part_total, 10) || 1));
         const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
         const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
-        const styleRules = 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const styleRules = 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (3.2) إذا كان المصدر يحتوي جدول أرقام أو بيانات موزعة على صفوف وأعمدة، أنشئ مشهدًا واحدًا على الأقل visual_type="table" وkind="table"، وضع العناوين والصفوف والأرقام الفعلية في table.headers وtable.rows؛ لا تكتفِ بذكر الأرقام في السرد أو bullets. انقل كل الصفوف المهمة دون حذف صف الإجمالي أو صافي الربح/الخسارة، وإذا كان الجدول طويلًا فقسّمه إلى جدولين متتابعين بدل إسقاط البيانات. (3.3) للمسائل الحسابية أنشئ بعد جدول المعطيات مشهدًا منفصلًا worked_example يعرض خطوات الحساب بالأرقام، ثم مشهدًا للقرار/النتيجة إن لزم. لا تخلط كل الأرقام في سرد صوتي دون إظهارها بصريًا. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -881,7 +881,7 @@ export default {
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
           const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
           const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
-          const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
+          let visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
           const visualFocus = clean(x.visual_focus || x.title || '');
           const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
           const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0,8) : [];
@@ -897,10 +897,12 @@ export default {
           if (x.table && typeof x.table === 'object' && Array.isArray(x.table.headers) && Array.isArray(x.table.rows)) {
             table = {
               headers: x.table.headers.map(clean).filter(Boolean).slice(0, 4),
-              rows: x.table.rows.slice(0, 6).map(r => Array.isArray(r) ? r.map(clean).slice(0, 4) : []).filter(r => r.length)
+              rows: x.table.rows.slice(0, 7).map(r => Array.isArray(r) ? r.map(clean).slice(0, 4) : []).filter(r => r.length)
             };
             if (!table.headers.length || !table.rows.length) table = null;
           }
+          // Structured table data must activate the table renderer even if Gemini's kind/type disagree.
+          if (table) { kind = 'table'; visualType = 'table'; }
           return {
             title,
             on_screen: onScreen,
