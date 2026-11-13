@@ -152,31 +152,37 @@ function slug(s) {
 const RATE_LIMIT_PER_MINUTE = 6;
 const RATE_LIMIT_PER_DAY = 60;
 
-async function checkRateLimit(env, ip) {
-  if (!env.QUIZ_KV || !ip) return null; // fail open if KV or IP unavailable
+// Per-student limits (by Firebase uid, incl. the device's anonymous identity) so
+// people sharing one IP (campus Wi-Fi / mobile carrier NAT) don't eat each other's
+// quota. A looser per-IP ceiling stays on top so scripts can't dodge limits by
+// minting endless anonymous accounts.
+const IP_CEILING_MULTIPLIER = 5;
 
-  const minuteKey = 'rl:min:' + ip;
-  const dayKey = 'rl:day:' + ip;
-
-  const [minuteRaw, dayRaw] = await Promise.all([
-    env.QUIZ_KV.get(minuteKey),
-    env.QUIZ_KV.get(dayKey),
-  ]);
+async function bumpLimit(env, id, perMin, perDay) {
+  const minuteKey = 'rl:min:' + id;
+  const dayKey = 'rl:day:' + id;
+  const [minuteRaw, dayRaw] = await Promise.all([env.QUIZ_KV.get(minuteKey), env.QUIZ_KV.get(dayKey)]);
   const minuteCount = minuteRaw ? parseInt(minuteRaw) : 0;
   const dayCount = dayRaw ? parseInt(dayRaw) : 0;
-
-  if (minuteCount >= RATE_LIMIT_PER_MINUTE) {
-    return 'كتّرت الطلبات في دقيقة واحدة — استنى دقيقة وجرب تاني.';
-  }
-  if (dayCount >= RATE_LIMIT_PER_DAY) {
-    return 'وصلت للحد الأقصى من طلبات الذكاء الاصطناعي المسموحة لك اليوم — جرب تاني بكرة.';
-  }
-
+  if (minuteCount >= perMin) return 'كتّرت الطلبات في دقيقة واحدة — استنى دقيقة وجرب تاني.';
+  if (dayCount >= perDay) return 'وصلت للحد الأقصى من طلبات الذكاء الاصطناعي المسموحة لك اليوم — جرب تاني بكرة.';
   await Promise.all([
     env.QUIZ_KV.put(minuteKey, String(minuteCount + 1), { expirationTtl: 60 }),
     env.QUIZ_KV.put(dayKey, String(dayCount + 1), { expirationTtl: 60 * 60 * 24 }),
   ]);
-  return null; // allowed
+  return null;
+}
+
+async function checkRateLimit(env, ip, uid) {
+  if (!env.QUIZ_KV) return null; // fail open if KV unavailable
+  if (uid) {
+    const userMsg = await bumpLimit(env, 'u:' + uid, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_DAY);
+    if (userMsg) return userMsg;
+    if (!ip) return null;
+    return await bumpLimit(env, ip, RATE_LIMIT_PER_MINUTE * IP_CEILING_MULTIPLIER, RATE_LIMIT_PER_DAY * IP_CEILING_MULTIPLIER);
+  }
+  if (!ip) return null;
+  return await bumpLimit(env, ip, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_DAY);
 }
 
 
@@ -334,6 +340,10 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
           visual_focus: { type: 'STRING' },
           emphasis: { type: 'ARRAY', items: { type: 'STRING' } },
           draw_steps: { type: 'ARRAY', items: { type: 'STRING' } },
+          calc_steps: {
+            type: 'ARRAY',
+            items: { type: 'OBJECT', properties: { label: { type: 'STRING' }, formula: { type: 'STRING' }, numbers: { type: 'STRING' }, result: { type: 'STRING' } } }
+          },
           solution_steps: {
             type: 'ARRAY',
             items: { type: 'OBJECT', properties: { step: { type: 'STRING' }, why: { type: 'STRING' }, calculation: { type: 'STRING' } } }
@@ -565,7 +575,18 @@ export default {
       // video_explain/video_tts accept anonymous device identity too; owner-only
       // operations below still require verifyOwner. Rate limiting remains active.
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary'];
+      // ---- published AI explainer videos: the owner generates + publishes once, students only watch ----
+      const PUBVID_PREFIX = 'pubvid:';
+      const MAX_PUBLISHED_PER_LECTURE = 12;
+      if (mode === 'video_get') {
+        const lectureUrl = String(body.lecture_url || '').trim().slice(0, 1500);
+        if (!lectureUrl || !env.QUIZ_KV) return jsonResponse({ videos: [] });
+        const rawList = await env.QUIZ_KV.get(PUBVID_PREFIX + (await sha256Hex(lectureUrl)));
+        let list = []; try { list = rawList ? JSON.parse(rawList) : []; } catch (e) { list = []; }
+        return jsonResponse({ videos: Array.isArray(list) ? list : [] });
+      }
+
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary', 'video_explain', 'video_tts', 'video_publish', 'video_unpublish'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -574,6 +595,32 @@ export default {
         if (!account || account.role !== 'owner') {
           return jsonResponse({ error: 'unauthorized' }, 403);
         }
+      }
+
+      if (mode === 'video_publish' || mode === 'video_unpublish') {
+        const lectureUrl = String(body.lecture_url || '').trim().slice(0, 1500);
+        const videoUrl = String(body.video_url || '').trim().slice(0, 1500);
+        if (!lectureUrl || !env.QUIZ_KV) return jsonResponse({ error: 'bad request' }, 400);
+        const listKey = PUBVID_PREFIX + (await sha256Hex(lectureUrl));
+        let list = []; try { const r = await env.QUIZ_KV.get(listKey); list = r ? JSON.parse(r) : []; } catch (e) { list = []; }
+        if (!Array.isArray(list)) list = [];
+        if (mode === 'video_unpublish') {
+          list = list.filter((v) => v && v.url !== videoUrl);
+        } else {
+          // only our own courses-worker R2 file urls may be published (no arbitrary links)
+          if (videoUrl.indexOf(COURSES_WORKER_ORIGIN + '/?action=file&k=') !== 0) return jsonResponse({ error: 'invalid video url' }, 400);
+          list = list.filter((v) => v && v.url !== videoUrl);
+          list.unshift({
+            url: videoUrl,
+            title: String(body.title || 'شرح بالفيديو').slice(0, 150),
+            explain_mode: ['theory', 'intensive', 'comprehensive'].includes(body.explain_mode) ? body.explain_mode : '',
+            scenes: Math.max(0, Math.min(60, parseInt(body.scenes, 10) || 0)),
+            at: Date.now(),
+          });
+          list = list.slice(0, MAX_PUBLISHED_PER_LECTURE);
+        }
+        await env.QUIZ_KV.put(listKey, JSON.stringify(list));
+        return jsonResponse({ ok: true, videos: list });
       }
 
       // ---- owner-only: analyze a course's existing hosted video -> study notes, in 3 short steps so the app
@@ -760,7 +807,8 @@ export default {
         const partTotal = Math.max(1, Math.min(8, parseInt(body.part_total, 10) || 1));
         const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
         const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
-        const styleRules = 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const calcRules = 'شرح الأرقام والقوائم المالية والمعادلات (مهم جدًا): كلما ظهر في المصدر جدول أو قائمة أو مسألة فيها أرقام يتم الحساب منها (مثل قائمة الدخل أو الميزانية أو أي معادلة بأرقام)، لا تقرأ الأرقام كأنها قائمة؛ استخدم visual_type="calc" وأضف calc_steps: مصفوفة من 2 إلى 4 خطوات، كل خطوة {label,formula,numbers,result}. label اسم البند المحسوب بالعربي (مثل: إجمالي الإيرادات). formula المعادلة بالكلمات بالعربي بأسماء البنود نفسها كما في المصدر (مثل: صافي المبيعات + إيراد التوزيعات + إيراد الإيجار). numbers نفس المعادلة بالأرقام فقط من المصدر (مثل: 3,500,000 + 100,000 + 70,000). result الناتج (مثل: 3,670,000). راجع كل عملية حسابية بنفسك: لا تخترع أرقامًا ولا تكتب ناتجًا خاطئًا، ولو لم تتأكد من البند فلا تذكره. في narration اشرح بصوت هادئ وبسيط كمدرّس: قل "إجمالي الإيرادات يساوي صافي المبيعات زائد إيراد التوزيعات زائد إيراد الإيجار، يعني ثلاثة ملايين وخمسمائة ألف زائد مائة ألف زائد سبعين ألف، يساوي ثلاثة ملايين وستمائة وسبعين ألف"، ثم انتقل للبند التالي بنفس الأسلوب، واجعل ترتيب الخطوات هو ترتيب ظهورها في السرد. اجعل صافي الدخل أو الناتج النهائي آخر خطوة. '
+        const styleRules = calcRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -782,7 +830,7 @@ export default {
           'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
           'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
-          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
+          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"calc_steps":[{"label":"...","formula":"...","numbers":"...","result":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
           modeRules + partRule + styleRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
@@ -880,12 +928,13 @@ export default {
           const sourceAnchor = clean(x.source_anchor || '');
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
           const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
-          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus'];
+          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus','calc'];
           const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
           const visualFocus = clean(x.visual_focus || x.title || '');
           const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
           const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0,8) : [];
           const solutionSteps = Array.isArray(x.solution_steps) ? x.solution_steps.slice(0,8).map((z) => ({ step: clean(z?.step || ''), why: clean(z?.why || ''), calculation: clean(z?.calculation || '') })).filter((z) => z.step || z.why || z.calculation) : [];
+          const calcSteps = Array.isArray(x.calc_steps) ? x.calc_steps.slice(0,4).map((z) => ({ label: clean(z?.label || ''), formula: clean(z?.formula || ''), numbers: clean(z?.numbers || ''), result: clean(z?.result || '') })).filter((z) => z.label && (z.numbers || z.result)) : [];
           let diagram = null;
           if (x.diagram && typeof x.diagram === 'object') {
             const center = clean(x.diagram.center || '');
@@ -913,6 +962,7 @@ export default {
             ...(emphasis.length ? { emphasis } : {}),
             ...(drawSteps.length ? { draw_steps: drawSteps } : {}),
             ...(solutionSteps.length ? { solution_steps: solutionSteps } : {}),
+            ...(calcSteps.length ? { calc_steps: calcSteps } : {}),
             ...(diagram ? { diagram } : {}),
             example: !!x.example,
             ...(sourceAnchor ? { source_anchor: sourceAnchor } : {}),
@@ -1011,7 +1061,8 @@ export default {
         }
 
         const ip = requestIp;
-        const limitMsg = await checkRateLimit(env, ip);
+        const rlUser = await verifyRealUser(request, env);
+        const limitMsg = await checkRateLimit(env, ip, rlUser && rlUser.uid);
         if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
         const instructions =
@@ -1076,7 +1127,8 @@ export default {
       // Only requests that actually need a fresh Gemini call count against the
       // per-student rate limit — cached results above are free.
       const ip = requestIp;
-      const limitMsg = await checkRateLimit(env, ip);
+      const rlUser = await verifyRealUser(request, env);
+        const limitMsg = await checkRateLimit(env, ip, rlUser && rlUser.uid);
       if (limitMsg) return jsonResponse({ error: limitMsg }, 429);
 
       const difficultyNote = {
