@@ -207,7 +207,7 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '5', video_explain: '13', video_brain: '3' };
+const PROMPT_VERSIONS = { video_script: '5', video_explain: '14', video_brain: '3' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -343,6 +343,27 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
           calc_steps: {
             type: 'ARRAY',
             items: { type: 'OBJECT', properties: { label: { type: 'STRING' }, formula: { type: 'STRING' }, numbers: { type: 'STRING' }, result: { type: 'STRING' } } }
+          },
+          problem: {
+            type: 'OBJECT',
+            properties: {
+              statement: { type: 'STRING' },
+              tables: {
+                type: 'ARRAY',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    title: { type: 'STRING' },
+                    headers: { type: 'ARRAY', items: { type: 'STRING' } },
+                    rows: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } }
+                  }
+                }
+              },
+              answers: {
+                type: 'ARRAY',
+                items: { type: 'OBJECT', properties: { label: { type: 'STRING' }, formula: { type: 'STRING' }, numbers: { type: 'STRING' }, result: { type: 'STRING' } } }
+              }
+            }
           },
           solution_steps: {
             type: 'ARRAY',
@@ -808,7 +829,8 @@ export default {
         const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
         const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
         const calcRules = 'شرح الأرقام والقوائم المالية والمعادلات (مهم جدًا): كلما ظهر في المصدر جدول أو قائمة أو مسألة فيها أرقام يتم الحساب منها (مثل قائمة الدخل أو الميزانية أو أي معادلة بأرقام)، لا تقرأ الأرقام كأنها قائمة؛ استخدم visual_type="calc" وأضف calc_steps: مصفوفة من 2 إلى 4 خطوات، كل خطوة {label,formula,numbers,result}. label اسم البند المحسوب بالعربي (مثل: إجمالي الإيرادات). formula المعادلة بالكلمات بالعربي بأسماء البنود نفسها كما في المصدر (مثل: صافي المبيعات + إيراد التوزيعات + إيراد الإيجار). numbers نفس المعادلة بالأرقام فقط من المصدر (مثل: 3,500,000 + 100,000 + 70,000). result الناتج (مثل: 3,670,000). راجع كل عملية حسابية بنفسك: لا تخترع أرقامًا ولا تكتب ناتجًا خاطئًا، ولو لم تتأكد من البند فلا تذكره. في narration اشرح بصوت هادئ وبسيط كمدرّس: قل "إجمالي الإيرادات يساوي صافي المبيعات زائد إيراد التوزيعات زائد إيراد الإيجار، يعني ثلاثة ملايين وخمسمائة ألف زائد مائة ألف زائد سبعين ألف، يساوي ثلاثة ملايين وستمائة وسبعين ألف"، ثم انتقل للبند التالي بنفس الأسلوب، واجعل ترتيب الخطوات هو ترتيب ظهورها في السرد. اجعل صافي الدخل أو الناتج النهائي آخر خطوة. '
-        const styleRules = calcRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const problemRules = 'المسائل العملية والأمثلة المحلولة (مهم جدًا): لما يظهر في المصدر سؤال عملي أو مثال محلول فيه بيانات رقمية (قوائم مالية، ميزانية، جداول، معطيات)، اجعله مشهدًا واحدًا visual_type="problem" وأضف problem: {statement, tables, answers}. statement: نص المسألة كما هو في المصدر (المعطيات والمطلوب) بدون تحريف. tables: انسخ كل جدول وارد في المسألة كاملًا بأرقامه كما هو (حتى 3 جداول، كل جدول حتى 16 صفًا و5 أعمدة، مع headers وrows وtitle للجدول) بدل الاعتماد على صورة الصفحة. answers: لكل مطلوب في المسألة بنفس ترتيبه (حتى 8) كائن {label,formula,numbers,result} حيث label اسم المطلوب، formula القانون بالكلمات، numbers التعويض بالأرقام فقط من الجداول، result الناتج؛ راجع كل حساب مرتين ولا تخترع أرقامًا. في narration: ابدأ بقراءة المسألة ووصف الجداول باختصار، ثم احلّ المطلوبات بنفس ترتيب answers، وتحدث بصوت هادئ وبسيط كمدرّس. لا تضع source_image_index في مشاهد problem أو calc. ';
+        const styleRules = calcRules + problemRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -830,7 +852,7 @@ export default {
           'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
           'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
           'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
-          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"calc_steps":[{"label":"...","formula":"...","numbers":"...","result":"..."}],"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
+          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"calc_steps":[{"label":"...","formula":"...","numbers":"...","result":"..."}],"problem":{"statement":"...","tables":[{"title":"...","headers":["..."],"rows":[["..."]]}],"answers":[{"label":"...","formula":"...","numbers":"...","result":"..."}]},"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
           modeRules + partRule + styleRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
@@ -928,13 +950,26 @@ export default {
           const sourceAnchor = clean(x.source_anchor || '');
           const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
           const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
-          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus','calc'];
+          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus','calc','problem'];
           const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
           const visualFocus = clean(x.visual_focus || x.title || '');
           const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
           const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0,8) : [];
           const solutionSteps = Array.isArray(x.solution_steps) ? x.solution_steps.slice(0,8).map((z) => ({ step: clean(z?.step || ''), why: clean(z?.why || ''), calculation: clean(z?.calculation || '') })).filter((z) => z.step || z.why || z.calculation) : [];
           const calcSteps = Array.isArray(x.calc_steps) ? x.calc_steps.slice(0,4).map((z) => ({ label: clean(z?.label || ''), formula: clean(z?.formula || ''), numbers: clean(z?.numbers || ''), result: clean(z?.result || '') })).filter((z) => z.label && (z.numbers || z.result)) : [];
+          let problem = null;
+          if (x.problem && typeof x.problem === 'object') {
+            const pTables = (Array.isArray(x.problem.tables) ? x.problem.tables : []).slice(0, 3).map((t) => ({
+              title: clean((t && t.title) || ''),
+              headers: (Array.isArray(t && t.headers) ? t.headers : []).slice(0, 5).map(clean),
+              rows: (Array.isArray(t && t.rows) ? t.rows : []).slice(0, 16).map((r) => (Array.isArray(r) ? r.slice(0, 5).map((c) => clean(c)) : [])).filter((r) => r.length),
+            })).filter((t) => t.rows.length);
+            const pAnswers = (Array.isArray(x.problem.answers) ? x.problem.answers : []).slice(0, 8).map((z) => ({
+              label: clean((z && z.label) || ''), formula: clean((z && z.formula) || ''), numbers: clean((z && z.numbers) || ''), result: clean((z && z.result) || ''),
+            })).filter((z) => z.label && (z.numbers || z.result));
+            const pStatement = clean(x.problem.statement || '').slice(0, 1200);
+            if (pStatement || pTables.length || pAnswers.length) problem = { statement: pStatement, tables: pTables, answers: pAnswers };
+          }
           let diagram = null;
           if (x.diagram && typeof x.diagram === 'object') {
             const center = clean(x.diagram.center || '');
@@ -963,6 +998,7 @@ export default {
             ...(drawSteps.length ? { draw_steps: drawSteps } : {}),
             ...(solutionSteps.length ? { solution_steps: solutionSteps } : {}),
             ...(calcSteps.length ? { calc_steps: calcSteps } : {}),
+            ...(problem ? { problem } : {}),
             ...(diagram ? { diagram } : {}),
             example: !!x.example,
             ...(sourceAnchor ? { source_anchor: sourceAnchor } : {}),
