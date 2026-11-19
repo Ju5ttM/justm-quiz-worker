@@ -967,7 +967,8 @@ export default {
           '(4) ممنوع تمامًا المربعات ذات الكلمة الواحدة بدون مضمونها (مثل "تعريف" أو "أهمية" لوحدها). لا تستخدم concept_map أو flow. ' +
           '(5) لو في المصدر أشياء تُقارن أو تُصنّف (مصطلحات، أنواع، مفاهيم متقابلة) استخدم visual_type="table" بجدول كامل في table (حتى 5 أعمدة و10 صفوف). وللقانون النظري visual_type="formula": الصيغة في emphasis[0] وفي bullets مدلول كل رمز ومتى يُستخدم. ' +
           '(6) المكتوب هو الهيكل والمعلومة الأساسية، والمنطوق في narration هو الشرح والسبب والتبسيط والمثال. ' +
-          '(7) لا تكرر نفس المعلومة في لوحتين، ولا تكتب مثالًا أو رقمًا غير موجود في المصدر، ولا تضع example=true إلا لو المصدر فيه مثال فعلاً. ';
+          '(7) لا تكرر نفس المعلومة في لوحتين، ولا تكتب مثالًا أو رقمًا غير موجود في المصدر، ولا تضع example=true إلا لو المصدر فيه مثال فعلاً. ' +
+          '(8) ممنوع مشهد ترحيب أو مقدمة بدون محتوى مكتوب: ادمج الترحيب في الجزء الأول من narration، وخلّي أول مشهد لوحة board فيها قسم label="محتوى المحاضرة" وkind="features" وitems هي أقسام المحاضرة بالترتيب بصيغة «[[القسم]]: جملة عن محتواه». وأي مشهد لازم يحتوي board أو bullets أو table أو problem، وممنوع يعتمد على narration فقط. ';
 
         const problemRules =
           'الأسئلة المحلولة والجداول الجاهزة والأمثلة بالأرقام: أي مشهد فيه أرقام أو حساب أو قائمة مالية أو مثال محلول يجب أن يكون visual_type="problem" والمدرس يفهم المسألة ويعيد صياغتها بنفسه: ' +
@@ -1109,6 +1110,7 @@ export default {
             if (secs.length) board = { sections: secs };
           }
           if (board && !bullets.length) bullets = board.sections.reduce((a, s) => a.concat(s.items), []).slice(0, 6);
+          if (!board && !bullets.length && onScreen && onScreen !== title) bullets = [onScreen.slice(0, 220)];
 
           const allowedVisuals = ['board', 'card', 'cards', 'steps', 'compare', 'formula', 'timeline', 'table', 'source_image', 'focus', 'problem'];
           let visualType = allowedVisuals.includes(String(x.visual_type))
