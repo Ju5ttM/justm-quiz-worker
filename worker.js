@@ -207,7 +207,52 @@ function isAllowedVideoUrl(u) {
 // Plain-text Gemini call (callGemini forces JSON output).
 // Bump a mode's version whenever its prompt changes: cached results are keyed
 // by content + mode only, so without this the OLD cached answer keeps being served.
-const PROMPT_VERSIONS = { video_script: '5', video_explain: '14', video_brain: '3' };
+// ---- owner-only "JustM summary designer": text/photos of a lecture -> structured study sheet ----
+const DESIGN_SUMMARY_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    title: { type: 'STRING' },
+    subtitle: { type: 'STRING' },
+    lecture_line: { type: 'STRING' },
+    sections: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          label: { type: 'STRING' },
+          title: { type: 'STRING' },
+          blocks: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                type: { type: 'STRING' },
+                title: { type: 'STRING' },
+                badge: { type: 'STRING' },
+                text: { type: 'STRING' },
+                items: { type: 'ARRAY', items: { type: 'STRING' } },
+                numbered: { type: 'BOOLEAN' },
+                formula: { type: 'STRING' },
+                table: {
+                  type: 'OBJECT',
+                  properties: {
+                    headers: { type: 'ARRAY', items: { type: 'STRING' } },
+                    rows: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } }
+                  }
+                }
+              },
+              required: ['type']
+            }
+          }
+        },
+        required: ['title', 'blocks']
+      }
+    }
+  },
+  required: ['title', 'sections']
+};
+
+const PROMPT_VERSIONS = { video_script: '5', video_explain: '15', video_brain: '3' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -349,6 +394,8 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
             type: 'OBJECT',
             properties: {
               statement: { type: 'STRING' },
+              requirement: { type: 'STRING' },
+              final: { type: 'STRING' },
               tables: {
                 type: 'ARRAY',
                 items: {
@@ -608,7 +655,7 @@ export default {
         return jsonResponse({ videos: Array.isArray(list) ? list : [] });
       }
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary', 'video_explain', 'video_tts', 'video_publish', 'video_unpublish'];
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary', 'video_explain', 'video_tts', 'video_publish', 'video_unpublish', 'design_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -809,6 +856,71 @@ export default {
       }
 
       // ---- AI explainer video script ------------------------------
+      // ---- owner-only: design a JustM-style study sheet from lecture text / photos ----
+      if (mode === 'design_summary') {
+        const text = String(body.text || '').trim().slice(0, 60000);
+        const images = Array.isArray(body.images) ? body.images.slice(0, 12) : [];
+        if (!text && !images.length) return jsonResponse({ error: 'اكتب نص المحاضرة أو ارفع صورها' }, 400);
+        const titleHint = String(body.title || '').trim().slice(0, 200);
+        const subHint = String(body.subtitle || '').trim().slice(0, 200);
+        const brief = body.detail === 'brief';
+        const dprompt =
+          'أنت أستاذ جامعي عربي تُعدّ ملخص مذاكرة مصممًا على طريقة ملفات JustM المرتبة. حوّل مادة المحاضرة المرفقة (نص و/أو صور صفحات أو سبورة أو خط يد) إلى ملف دراسة منظم. ' +
+          'اقرأ الصور بعناية واستخرج كل ما فيها حرفيًا بما في ذلك الأرقام والقوانين والجداول، وصحّح الأخطاء الإملائية الواضحة فقط. لا تخترع معلومة ولا رقمًا غير موجود في المادة، ولا تغيّر مصطلحات المحاضرة. ما لا يُقرأ بوضوح اكتبه كما يبدو أو اتركه. ' +
+          (brief ? 'المستوى: مختصر ومركّز للمراجعة السريعة، لكن لا تُسقط تعريفًا أو قانونًا أو رقمًا مهمًا. ' : 'المستوى: كامل ومفصّل، يغطي كل نقاط المحاضرة بالترتيب دون إسقاط تعريف أو قانون أو مثال أو ملاحظة. ') +
+          'قسّم الملف إلى أقسام بنفس ترتيب المحاضرة؛ لكل قسم label ترتيبي ("أولاً" ثم "ثانياً" ثم "ثالثاً" ...) وtitle هو اسم القسم، وداخله blocks بالأنواع التالية فقط: ' +
+          'definition (تعريف أو مفهوم أساسي)، info (معلومة أو شرح مكمّل)، warning (تنبيه أو أخطاء شائعة أو عيوب أو استثناءات)، example (مثال أو تطبيق أو فائدة)، note (ملاحظة سريعة)، summary (خلاصة أو أهداف أو استخدامات)، table (جدول أو مقارنة)، formula (قانون أو معادلة)، paragraph (فقرة عادية بدون صندوق). ' +
+          'لكل block: title عنوان قصير للصندوق (بدون رموز تعبيرية)، badge يكون "مهم" أو "مهم جداً" فقط للنقاط التي يُتوقع أن تأتي في الامتحان وإلا اتركه فارغًا، text شرح بجمل واضحة، items قائمة نقاط (ومعها numbered=true إذا كانت خطوات أو ترتيبًا، وإلا false). ' +
+          'في أي نص أو نقطة: ضع الكلمة أو العبارة المهمة (مصطلح أو رقم أو قاعدة) بين [[ ]] للتظليل الأصفر، من 1 إلى 3 تظليلات في الصندوق الواحد وبحد أقصى كلمات قليلة لكل تظليل، واكتب عنوان النقطة داخل القائمة بين ** ** بالشكل **العنوان:** الشرح. ' +
+          'للمقارنات بين شيئين أو أكثر استخدم table ببنية headers وrows (العمود الأول اسم العنصر المقارَن)، وللقوانين استخدم formula بنص المعادلة نفسه مع title اسم القانون، ولا تكرر محتوى الجدول في text. ' +
+          'لا تستخدم markdown غير ** ** و[[ ]]، ولا HTML، ولا رموز تعبيرية. ابدأ بـ title عنوان المحاضرة، وsubtitle اسم المادة/الدكتور إن ذُكر في المادة، وlecture_line جملة قصيرة تعرّف المحاضرة (مثل: المحاضرة السابعة — النظرية الكينزية). ' +
+          (titleHint ? ('عنوان المحاضرة المطلوب حرفيًا: ' + titleHint + '. ') : '') +
+          (subHint ? ('سطر المادة المطلوب حرفيًا: ' + subHint + '. ') : '') +
+          'أرجع JSON صالحًا فقط.' +
+          (text ? ('\n\nنص المحاضرة:\n' + text) : '');
+        const dparts = [{ text: dprompt }];
+        for (const img of images) {
+          if (img && img.mimeType && img.data) dparts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });
+        }
+        let draw;
+        try {
+          draw = await callGemini(env, dparts, { maxOutputTokens: 32000, responseMimeType: 'application/json', responseSchema: DESIGN_SUMMARY_SCHEMA, temperature: 0.2 });
+        } catch (e1) {
+          if (e1 && e1.status === 502) {
+            draw = await callGemini(env, [{ text: dprompt + '\n\nإعادة محاولة: أخرج JSON كاملًا وصالحًا فقط واجعل الصياغة أكثر إيجازًا.' }].concat(dparts.slice(1)), { maxOutputTokens: 20000, responseMimeType: 'application/json', responseSchema: DESIGN_SUMMARY_SCHEMA, temperature: 0.1 });
+          } else { throw e1; }
+        }
+        const keep = (v, n) => String(v == null ? '' : v).replace(/[#`<>]/g, '').trim().slice(0, n || 4000);
+        draw = draw && typeof draw === 'object' ? draw : {};
+        const TYPES = ['definition', 'info', 'warning', 'example', 'note', 'summary', 'table', 'formula', 'paragraph'];
+        const dsections = (Array.isArray(draw.sections) ? draw.sections : []).slice(0, 25).map((sec) => ({
+          label: keep(sec && sec.label, 20),
+          title: keep(sec && sec.title, 200),
+          blocks: (Array.isArray(sec && sec.blocks) ? sec.blocks : []).slice(0, 20).map((b) => {
+            b = b && typeof b === 'object' ? b : {};
+            let table = null;
+            if (b.table && Array.isArray(b.table.rows) && b.table.rows.length) {
+              table = {
+                headers: (Array.isArray(b.table.headers) ? b.table.headers : []).slice(0, 6).map((c) => keep(c, 200)),
+                rows: b.table.rows.slice(0, 30).map((r) => (Array.isArray(r) ? r.slice(0, 6).map((c) => keep(c, 400)) : [])).filter((r) => r.length)
+              };
+            }
+            return {
+              type: TYPES.includes(String(b.type)) ? String(b.type) : 'paragraph',
+              title: keep(b.title, 200),
+              badge: /جداً|جدا/.test(String(b.badge || '')) ? 'مهم جداً' : (/مهم/.test(String(b.badge || '')) ? 'مهم' : ''),
+              text: keep(b.text, 3000),
+              items: (Array.isArray(b.items) ? b.items : []).slice(0, 14).map((i) => keep(i, 900)).filter(Boolean),
+              numbered: !!b.numbered,
+              formula: keep(b.formula, 400),
+              ...(table ? { table } : {})
+            };
+          }).filter((b) => b.title || b.text || b.items.length || b.formula || b.table)
+        })).filter((sec) => sec.title && sec.blocks.length);
+        if (!dsections.length) return jsonResponse({ error: 'DESIGN_EMPTY', message: 'ما قدرتش أطلّع أقسام من المادة، جرّب صور أوضح أو نص أكتر.' }, 502);
+        return jsonResponse({ doc: { title: keep(draw.title || titleHint || 'ملخص المحاضرة', 200), subtitle: keep(draw.subtitle || subHint, 200), lecture_line: keep(draw.lecture_line, 300), sections: dsections } });
+      }
+
       if (mode === 'video_explain') {
         const text = String(body.text || '').trim().slice(0, 70000);
         const images = Array.isArray(body.images) ? body.images.slice(0, 12) : [];
@@ -830,10 +942,11 @@ export default {
         const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
         const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
         const calcRules = 'شرح الأرقام والقوائم المالية والمعادلات (مهم جدًا): كلما ظهر في المصدر جدول أو قائمة أو مسألة فيها أرقام يتم الحساب منها (مثل قائمة الدخل أو الميزانية أو أي معادلة بأرقام)، لا تقرأ الأرقام كأنها قائمة؛ استخدم visual_type="calc" وأضف calc_steps: مصفوفة من 2 إلى 4 خطوات، كل خطوة {label,formula,numbers,result}. label اسم البند المحسوب بالعربي (مثل: إجمالي الإيرادات). formula المعادلة بالكلمات بالعربي بأسماء البنود نفسها كما في المصدر (مثل: صافي المبيعات + إيراد التوزيعات + إيراد الإيجار). numbers نفس المعادلة بالأرقام فقط من المصدر (مثل: 3,500,000 + 100,000 + 70,000). result الناتج (مثل: 3,670,000). راجع كل عملية حسابية بنفسك: لا تخترع أرقامًا ولا تكتب ناتجًا خاطئًا، ولو لم تتأكد من البند فلا تذكره. في narration اشرح بصوت هادئ وبسيط كمدرّس: قل "إجمالي الإيرادات يساوي صافي المبيعات زائد إيراد التوزيعات زائد إيراد الإيجار، يعني ثلاثة ملايين وخمسمائة ألف زائد مائة ألف زائد سبعين ألف، يساوي ثلاثة ملايين وستمائة وسبعين ألف"، ثم انتقل للبند التالي بنفس الأسلوب، واجعل ترتيب الخطوات هو ترتيب ظهورها في السرد. اجعل صافي الدخل أو الناتج النهائي آخر خطوة. '
-        const problemRules = 'المسائل العملية والأمثلة المحلولة (مهم جدًا): لما يظهر في المصدر سؤال عملي أو مثال محلول فيه بيانات رقمية (قوائم مالية، ميزانية، جداول، معطيات)، اجعله مشهدًا واحدًا visual_type="problem" وأضف problem: {statement, tables, answers}. statement: نص المسألة كما هو في المصدر (المعطيات والمطلوب) بدون تحريف. tables: انسخ كل جدول وارد في المسألة كاملًا بأرقامه كما هو (حتى 3 جداول، كل جدول حتى 16 صفًا و5 أعمدة، مع headers وrows وtitle للجدول) بدل الاعتماد على صورة الصفحة. answers: لكل مطلوب في المسألة بنفس ترتيبه (حتى 8) كائن {label,formula,numbers,result} حيث label اسم المطلوب، formula القانون بالكلمات، numbers التعويض بالأرقام فقط من الجداول، result الناتج؛ راجع كل حساب مرتين ولا تخترع أرقامًا. في narration: ابدأ بقراءة المسألة ووصف الجداول باختصار، ثم احلّ المطلوبات بنفس ترتيب answers، وتحدث بصوت هادئ وبسيط كمدرّس. لا تضع source_image_index في مشاهد problem أو calc. ';
+        const problemRules = 'المسائل العملية والأمثلة المحلولة (أهم قاعدة في الفيديو): أي مشهد فيه أرقام أو حساب أو قائمة مالية أو مثال محلول يجب أن يكون visual_type="problem" وأن يعمل كأستاذ حقيقي على السبورة: (1) يعيد بناء السؤال أولًا حتى لو كان المصدر يعرض الحل مباشرة بدون سؤال؛ استنتج المعطيات من الأرقام الموجودة في الحل أو الجدول، واكتبها في problem.statement بصياغة سؤال واضح (مثل: بلغت المبيعات 500,000 جنيه ومردودات المبيعات 20,000 جنيه... احسب صافي المبيعات)، ولا تضف أي رقم غير موجود في المصدر. (2) problem.tables: ضع المعطيات في جدول واضح بالتفصيل (عمود البيان وعمود المبلغ، ويمكن عمود ثالث للملاحظة) يتضمن كل رقم مستخدم في الحل بنفس اسم البند في المصدر؛ وإن كان في المصدر جدول أو قائمة فانسخها كاملة (حتى 3 جداول، 16 صفًا، 5 أعمدة). (3) problem.requirement: جملة المطلوب (ماذا نحسب بالضبط). (4) problem.answers: كل مطلوب أو خطوة حساب بالترتيب (حتى 8) بصيغة {label,formula,numbers,result}: label اسم البند، formula القانون بالكلمات بأسماء البنود نفسها، numbers نفس القانون بالأرقام المعوّضة من الجدول فقط، result الناتج مع الوحدة. حل الأرقام خطوة خطوة كأستاذ: لا تقفز للناتج، وإن كان الحل يحتاج مجموعًا أو فرقًا وسيطًا فاجعله خطوة مستقلة. راجع كل عملية حسابية مرتين وصحّح أي رقم لا يطابق المصدر. (5) problem.final: جملة النتيجة النهائية (مثل: صافي المبيعات = 470,000 جنيه). لا تستخدم worked_example ولا calc للأرقام، ولا تضع source_image_index في مشاهد problem. لو احتاج المثال أكثر من 8 خطوات قسّمه على مشهدين problem متتاليين. ';
         const structureRules = 'تقسيم الشرح على طريقة ملفات JustM الجاهزة (مهم جدًا): قسّم الفيديو على أقسام المحاضرة نفسها بنفس ترتيبها، ومشهد أو أكثر لكل قسم. لكل مشهد اكتب section_label بصيغة ترتيبية قصيرة: "أولاً" ثم "ثانياً" ثم "ثالثاً" ثم "رابعاً" ثم "خامساً"... (أو رقم لو القسم المرقّم في الملف) ويبقى نفس الترتيب في الفيديو كله، وخلّي title اسم القسم نفسه كما في الملف. لو في المحاضرة تعريف فاكتبه في مشهد card في أول bullet بدون تغيير. لما يكون فيه مقارنة بين شيئين (مثل المالية مقابل الإدارية، أو أنواع، أو مراحل) استخدم visual_type="table" برأس أعمدة واضح وأول عمود هو اسم العنصر المقارَن، أو "compare" واكتب كل نقطة بصيغة «اسم الطرف: الشرح» وبنفس ترتيب الطرفين. ';
         const highlightRules = 'تظليل الكلمات المهمة: في bullets وفي خلايا الجداول وفي visual_focus ضع الكلمة أو المصطلح المهم (اسم المفهوم، التعريف، الرقم المهم) بين علامتين مزدوجتين مثل [[أساس الاستحقاق]]، من كلمة إلى ثلاث كلمات فقط، وبحد أقصى 2 إلى 3 تظليلات في المشهد الواحد، ولا تظلل جملة كاملة. ممنوع تمامًا استخدام العلامات [[ ]] داخل narration أو داخل أي حقل رقمي (calc_steps أو problem.answers) ولا في العنوان. ';
-        const styleRules = structureRules + highlightRules + calcRules + problemRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const beatRules = 'ربط الصوت بالشاشة (مهم جدًا حتى لا يسبق الكلام الكتابة): اكتب narration مقسّمًا إلى أجزاء مفصولة بالعلامة ¶ (علامة الفقرة) تمامًا، والجزء الواحد هو ما يقوله المدرّس وهو يشير إلى عنصر واحد على الشاشة، بحيث لا يتحدث عن عنصر قبل جزئه. في مشاهد problem: جزء أول يقرأ السؤال ويصف الجدول وأرقامه، ثم جزء للمطلوب، ثم جزء لكل خطوة في answers بنفس ترتيبها (القانون بالكلام ثم الأرقام ثم الناتج)، ثم جزء أخير للنتيجة النهائية؛ فعدد الأجزاء = عدد اللوحات (سؤال + مطلوب + عدد answers + نتيجة نهائية). في مشاهد cards وsteps وcompare وflow وtimeline: جزء مقدمة قصير ثم جزء لكل نقطة من bullets بنفس الترتيب. في calc: جزء لكل خطوة. في المشاهد البسيطة (card وfocus وsource_image) يمكن جزء واحد أو اثنان. لا تكتب علامة ¶ في أي مكان آخر ولا تبدأ بها ولا تكررها. ';
+        const styleRules = structureRules + highlightRules + calcRules + problemRules + beatRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
         const prompt =
           'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
           'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
@@ -972,7 +1085,9 @@ export default {
               label: clean((z && z.label) || ''), formula: clean((z && z.formula) || ''), numbers: clean((z && z.numbers) || ''), result: clean((z && z.result) || ''),
             })).filter((z) => z.label && (z.numbers || z.result));
             const pStatement = clean(x.problem.statement || '').slice(0, 1200);
-            if (pStatement || pTables.length || pAnswers.length) problem = { statement: pStatement, tables: pTables, answers: pAnswers };
+            const pRequirement = clean(x.problem.requirement || '').slice(0, 500);
+            const pFinal = clean(x.problem.final || '').slice(0, 300);
+            if (pStatement || pRequirement || pTables.length || pAnswers.length) problem = { statement: pStatement, requirement: pRequirement, final: pFinal, tables: pTables, answers: pAnswers };
           }
           let diagram = null;
           if (x.diagram && typeof x.diagram === 'object') {
