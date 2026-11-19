@@ -373,6 +373,23 @@ const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
         properties: {
           title: { type: 'STRING' },
           section_label: { type: 'STRING' },
+          lecture: { type: 'STRING' },
+          board: {
+            type: 'OBJECT',
+            properties: {
+              sections: {
+                type: 'ARRAY',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    label: { type: 'STRING' },
+                    kind: { type: 'STRING' },
+                    items: { type: 'ARRAY', items: { type: 'STRING' } }
+                  }
+                }
+              }
+            }
+          },
           on_screen: { type: 'STRING' },
           bullets: { type: 'ARRAY', items: { type: 'STRING' } },
           narration: { type: 'STRING' },
@@ -933,45 +950,58 @@ export default {
 
         const explainMode = ['theory', 'intensive', 'comprehensive'].includes(body.explain_mode) ? body.explain_mode : '';
         const MODE_LENGTH = {
-          theory: 'اجعل الفيديو النظري لهذا الجزء كله نحو دقيقة إلى دقيقتين إجمالًا (150 إلى 300 كلمة تقريبًا موزعة على مشهدين أو ثلاثة). اجعل كل مشهد 50 إلى 110 كلمات، واشرح الفكرة والتعريف والأهمية بوضوح من المصدر. اجمع النقاط المتقاربة، واحذف الحشو والتكرار، ولا تسقط الفكرة الأساسية.',
-          intensive: 'سرد كل مشهد من 60 إلى 110 كلمة، أسلوب سريع ومباشر، والأولوية للقوانين والأرقام وخطوات الحل',
-          comprehensive: 'شرح تفصيلي بدون أي تلخيص، زي NotebookLM، وحدد طول كل نقطة حسب صعوبتها بنفسك. (أ) نظري بسيط وكلام واضح: اشرحه زي ما هو في الملف مع توضيح بسيط لأي حاجة مش مفهومة، من 100 إلى 200 كلمة. (ب) عملي مباشر مبني على تعويض وجمع وطرح (زي قائمة الدخل): اذكر القانون بالكلام ثم عوّض بالأرقام الفعلية بندًا بندًا ثم الناتج، مثل: صافي إيراد المبيعات = المبيعات − الخصومات − المردودات = 3,600,000 − 24,000 − 76,000 = 3,500,000. من 150 إلى 300 كلمة (دقيقة إلى دقيقتين) من غير حشو ومن غير تلخيص. (ج) فكرة كبيرة فيها قوانين كتيرة وتحتاج تفكير: اشرحها بالتفصيل وحل الأمثلة خطوة خطوة، من 400 إلى 600 كلمة كحد أقصى (من 3 إلى 4 دقائق)، ولا تطوّل أكتر من كده. أهم حاجة الدقة: راجع كل عملية حسابية قبل ما تكتبها، واستخدم أرقام الملف نفسها، والكتابة على الشاشة تتنقل من الملف بأرقامه ومصطلحاته بدون تحريف.'
+          theory: 'اجعل الفيديو النظري لهذا الجزء نحو دقيقة إلى دقيقتين إجمالًا (150 إلى 300 كلمة). اشرح الفكرة والتعريف والأهمية بوضوح من المصدر مع كتابة المحتوى النظري كاملًا على السبورة.',
+          intensive: 'سرد كل مشهد من 60 إلى 110 كلمة، أسلوب سريع ومباشر، والأولوية للقوانين والأرقام وخطوات الحل على السبورة.',
+          comprehensive: 'شرح تفصيلي بدون أي تلخيص، وحدد طول كل لوحة حسب صعوبتها: (أ) نظري: اشرحه كاملًا مع توضيح أي مصطلح، من 100 إلى 220 كلمة، واكتب التعريفات والنقاط كاملة على السبورة. (ب) عملي مباشر (مثل القوائم المالية): اذكر القانون بالكلام ثم عوّض بالأرقام الفعلية بندًا بندًا ثم الناتج، من 150 إلى 300 كلمة. (ج) مسألة كبيرة أو قوانين متعددة: اشرحها بالتفصيل وحل الأمثلة خطوة خطوة، من 400 إلى 600 كلمة كحد أقصى. راجع كل عملية حسابية مرتين واستخدم أرقام الملف نفسها.'
         };
-        const modeRules = explainMode ? ('قواعد الطول الخاصة بالنمط المختار، وهي تلغي أي نطاق سابق لعدد المشاهد أو مدتها أو طول السرد: ' + MODE_LENGTH[explainMode] + '. ') : '';
+        const modeRules = explainMode ? ('قواعد الطول الخاصة بالنمط المختار: ' + MODE_LENGTH[explainMode] + ' ') : '';
         const partTotal = Math.max(1, Math.min(8, parseInt(body.part_total, 10) || 1));
-        const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 3));
-        const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشهد/مشاهد لهذه الدفعة فقط (يلغي أي عدد مشاهد مذكور سابقًا)، وخلّي كل مشهد طويل وعميق حسب طول السرد المطلوب. ') : '';
-        const calcRules = 'شرح الأرقام والقوائم المالية والمعادلات (مهم جدًا): كلما ظهر في المصدر جدول أو قائمة أو مسألة فيها أرقام يتم الحساب منها (مثل قائمة الدخل أو الميزانية أو أي معادلة بأرقام)، لا تقرأ الأرقام كأنها قائمة؛ استخدم visual_type="calc" وأضف calc_steps: مصفوفة من 2 إلى 4 خطوات، كل خطوة {label,formula,numbers,result}. label اسم البند المحسوب بالعربي (مثل: إجمالي الإيرادات). formula المعادلة بالكلمات بالعربي بأسماء البنود نفسها كما في المصدر (مثل: صافي المبيعات + إيراد التوزيعات + إيراد الإيجار). numbers نفس المعادلة بالأرقام فقط من المصدر (مثل: 3,500,000 + 100,000 + 70,000). result الناتج (مثل: 3,670,000). راجع كل عملية حسابية بنفسك: لا تخترع أرقامًا ولا تكتب ناتجًا خاطئًا، ولو لم تتأكد من البند فلا تذكره. في narration اشرح بصوت هادئ وبسيط كمدرّس: قل "إجمالي الإيرادات يساوي صافي المبيعات زائد إيراد التوزيعات زائد إيراد الإيجار، يعني ثلاثة ملايين وخمسمائة ألف زائد مائة ألف زائد سبعين ألف، يساوي ثلاثة ملايين وستمائة وسبعين ألف"، ثم انتقل للبند التالي بنفس الأسلوب، واجعل ترتيب الخطوات هو ترتيب ظهورها في السرد. اجعل صافي الدخل أو الناتج النهائي آخر خطوة. '
-        const problemRules = 'المسائل العملية والأمثلة المحلولة (أهم قاعدة في الفيديو): أي مشهد فيه أرقام أو حساب أو قائمة مالية أو مثال محلول يجب أن يكون visual_type="problem" وأن يعمل كأستاذ حقيقي على السبورة: (1) يعيد بناء السؤال أولًا حتى لو كان المصدر يعرض الحل مباشرة بدون سؤال؛ استنتج المعطيات من الأرقام الموجودة في الحل أو الجدول، واكتبها في problem.statement بصياغة سؤال واضح (مثل: بلغت المبيعات 500,000 جنيه ومردودات المبيعات 20,000 جنيه... احسب صافي المبيعات)، ولا تضف أي رقم غير موجود في المصدر. (2) problem.tables: ضع المعطيات في جدول واضح بالتفصيل (عمود البيان وعمود المبلغ، ويمكن عمود ثالث للملاحظة) يتضمن كل رقم مستخدم في الحل بنفس اسم البند في المصدر؛ وإن كان في المصدر جدول أو قائمة فانسخها كاملة (حتى 3 جداول، 16 صفًا، 5 أعمدة). (3) problem.requirement: جملة المطلوب (ماذا نحسب بالضبط). (4) problem.answers: كل مطلوب أو خطوة حساب بالترتيب (حتى 8) بصيغة {label,formula,numbers,result}: label اسم البند، formula القانون بالكلمات بأسماء البنود نفسها، numbers نفس القانون بالأرقام المعوّضة من الجدول فقط، result الناتج مع الوحدة. حل الأرقام خطوة خطوة كأستاذ: لا تقفز للناتج، وإن كان الحل يحتاج مجموعًا أو فرقًا وسيطًا فاجعله خطوة مستقلة. راجع كل عملية حسابية مرتين وصحّح أي رقم لا يطابق المصدر. (5) problem.final: جملة النتيجة النهائية (مثل: صافي المبيعات = 470,000 جنيه). لا تستخدم worked_example ولا calc للأرقام، ولا تضع source_image_index في مشاهد problem. لو احتاج المثال أكثر من 8 خطوات قسّمه على مشهدين problem متتاليين. ';
-        const structureRules = 'تقسيم الشرح على طريقة ملفات JustM الجاهزة (مهم جدًا): قسّم الفيديو على أقسام المحاضرة نفسها بنفس ترتيبها، ومشهد أو أكثر لكل قسم. لكل مشهد اكتب section_label بصيغة ترتيبية قصيرة: "أولاً" ثم "ثانياً" ثم "ثالثاً" ثم "رابعاً" ثم "خامساً"... (أو رقم لو القسم المرقّم في الملف) ويبقى نفس الترتيب في الفيديو كله، وخلّي title اسم القسم نفسه كما في الملف. لو في المحاضرة تعريف فاكتبه في مشهد card في أول bullet بدون تغيير. لما يكون فيه مقارنة بين شيئين (مثل المالية مقابل الإدارية، أو أنواع، أو مراحل) استخدم visual_type="table" برأس أعمدة واضح وأول عمود هو اسم العنصر المقارَن، أو "compare" واكتب كل نقطة بصيغة «اسم الطرف: الشرح» وبنفس ترتيب الطرفين. ';
-        const highlightRules = 'تظليل الكلمات المهمة: في bullets وفي خلايا الجداول وفي visual_focus ضع الكلمة أو المصطلح المهم (اسم المفهوم، التعريف، الرقم المهم) بين علامتين مزدوجتين مثل [[أساس الاستحقاق]]، من كلمة إلى ثلاث كلمات فقط، وبحد أقصى 2 إلى 3 تظليلات في المشهد الواحد، ولا تظلل جملة كاملة. ممنوع تمامًا استخدام العلامات [[ ]] داخل narration أو داخل أي حقل رقمي (calc_steps أو problem.answers) ولا في العنوان. ';
-        const beatRules = 'ربط الصوت بالشاشة (مهم جدًا حتى لا يسبق الكلام الكتابة): اكتب narration مقسّمًا إلى أجزاء مفصولة بالعلامة ¶ (علامة الفقرة) تمامًا، والجزء الواحد هو ما يقوله المدرّس وهو يشير إلى عنصر واحد على الشاشة، بحيث لا يتحدث عن عنصر قبل جزئه. في مشاهد problem: جزء أول يقرأ السؤال ويصف الجدول وأرقامه، ثم جزء للمطلوب، ثم جزء لكل خطوة في answers بنفس ترتيبها (القانون بالكلام ثم الأرقام ثم الناتج)، ثم جزء أخير للنتيجة النهائية؛ فعدد الأجزاء = عدد اللوحات (سؤال + مطلوب + عدد answers + نتيجة نهائية). في مشاهد cards وsteps وcompare وflow وtimeline: جزء مقدمة قصير ثم جزء لكل نقطة من bullets بنفس الترتيب. في calc: جزء لكل خطوة. في المشاهد البسيطة (card وfocus وsource_image) يمكن جزء واحد أو اثنان. لا تكتب علامة ¶ في أي مكان آخر ولا تبدأ بها ولا تكررها. ';
-        const styleRules = structureRules + highlightRules + calcRules + problemRules + beatRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const sceneTarget = Math.max(1, Math.min(12, parseInt(body.scene_target, 10) || 4));
+        const partRule = partTotal > 1 ? ('هذه الدفعة جزء من محاضرة مقسمة على ' + partTotal + ' دفعات: اكتب حوالي ' + sceneTarget + ' مشاهد لهذه الدفعة فقط، واجعل كل مشهد غنيًا بالمحتوى المكتوب على الشاشة. مشاهد الامتحان تُكتب فقط في آخر دفعة. ') : '';
+
+        const boardRules =
+          'القاعدة الذهبية — السبورة بتشرح مش بتعرض عناوين: تخيّل أن الطالب كاتم الصوت وبيذاكر من الشاشة فقط، فلازم يلاقي صفحة ملخص كاملة زي ملفات JustM. ' +
+          '(1) لوحة واحدة لكل قسم رئيسي في المصدر (أولاً، ثانياً...): visual_type="board" وفيها board.sections من 1 إلى 3 أقسام تظهر على نفس السبورة مع بعض، مثل: قسم «مفهوم» ثم قسم «أهمية» ثم «أنواع» أو «شروط» أو «خصائص»، بترتيب المصدر. ' +
+          '(2) كل قسم {label,kind,items}: label كلمة أو اثنتين (مفهوم، أهمية، أنواع، شروط، خصائص، خطوات، تنبيه)، وkind واحدة من: concept, importance, types, conditions, features, steps, example, warning. items من 1 إلى 5 عناصر (الواجهة بترقّمها تلقائيًا)، وكل عنصر بصيغة «[[العنوان]]: جملة أو جملتين تحمل المعلومة نفسها من المصدر». التعريف يُكتب كاملًا ودقيقًا كأول عنصر في قسم المفهوم، ولو طويل قسّمه لأركانه. ' +
+          '(3) إجمالي عناصر اللوحة 8 كحد أقصى؛ لو القسم أكبر قسّمه على لوحتين. ' +
+          '(4) ممنوع تمامًا المربعات ذات الكلمة الواحدة بدون مضمونها (مثل "تعريف" أو "أهمية" لوحدها). لا تستخدم concept_map أو flow. ' +
+          '(5) لو في المصدر أشياء تُقارن أو تُصنّف (مصطلحات، أنواع، مفاهيم متقابلة) استخدم visual_type="table" بجدول كامل في table (حتى 5 أعمدة و10 صفوف). وللقانون النظري visual_type="formula": الصيغة في emphasis[0] وفي bullets مدلول كل رمز ومتى يُستخدم. ' +
+          '(6) المكتوب هو الهيكل والمعلومة الأساسية، والمنطوق في narration هو الشرح والسبب والتبسيط والمثال. ' +
+          '(7) لا تكرر نفس المعلومة في لوحتين، ولا تكتب مثالًا أو رقمًا غير موجود في المصدر، ولا تضع example=true إلا لو المصدر فيه مثال فعلاً. ';
+
+        const problemRules =
+          'الأسئلة المحلولة والجداول الجاهزة والأمثلة بالأرقام: أي مشهد فيه أرقام أو حساب أو قائمة مالية أو مثال محلول يجب أن يكون visual_type="problem" والمدرس يفهم المسألة ويعيد صياغتها بنفسه: ' +
+          '(1) problem.statement = نص السؤال كاملًا بصياغة واضحة كما يُطرح في الامتحان، مبني على معطيات المصدر فقط، حتى لو المصدر عارض الجدول المحلول بدون سؤال صريح؛ فاستنتج السؤال من الجدول وطريقة الحل ولا تخترع أي رقم. ' +
+          '(2) problem.tables: جدول المعطيات كما كان قبل الحل (عمود البيان وعمود المبلغ، وعمود ثالث للملاحظة عند الحاجة) بكل أرقام وبنود المصدر (حتى 3 جداول، 16 صفًا، 5 أعمدة). ' +
+          '(3) problem.requirement: جملة المطلوب بدقة. ' +
+          '(4) problem.answers: كل خطوة حل بالترتيب نفسه وبطريقة الحل نفسها الموجودة في المصدر (حتى 8) بصيغة {label,formula,numbers,result}: label اسم البند، formula القانون بالكلمات، numbers التعويض بالأرقام، result الناتج مع الوحدة. لا تقفز للناتج النهائي وراجع الحسابات مرتين. ' +
+          '(5) problem.final: جملة النتيجة النهائية. ' +
+          '(6) في narration: اقرأ السؤال أولًا بصياغتك ثم اشرح الحل خطوة خطوة. لا تضع source_image_index في مشاهد problem إلا لو الصفحة فيها جدول معقد يصعب نقله. ';
+
+        const examRules =
+          'مشاهد الامتحان في آخر الفيديو (إلزامي في آخر دفعة): بعد شرح كل المحتوى أضف مشهدًا أو مشهدين أخيرين visual_type="board" وkind="exam" وsection_label="للامتحان" وlecture="أسئلة متوقعة للامتحان"، فيهم قسم واحد kind="exam" وlabel="ممكن يجيلك في الامتحان" وitems من 3 إلى 5 أسئلة متوقعة مبنية على المصدر بصيغة «[[نوع السؤال]]: نص السؤال المتوقع» (مثل: عرّف...؟ اذكر أهمية...؟ ما الفرق بين...؟ حل المسألة التالية...). في narration قل للطالب إنه ممكن يجيله في الامتحان سؤال بصيغة كذا، وبعدها لمّح بإجابة مختصرة لكل سؤال. ';
+
+        const lectureRules =
+          'تعدد المحاضرات: لو الملف ملخص لأكثر من محاضرة أو موضوع رئيسي، اكتب في كل مشهد الحقل lecture بعنوان موضوع المحاضرة التي ينتمي لها (نفس النص بالحرف في كل مشاهد المحاضرة الواحدة) والواجهة هتغيّر لون الهيدر وتكتب عليه موضوع المحاضرة. لو الملف محاضرة واحدة اكتب موضوعها نفسه في كل المشاهد. ';
+
+        const structureRules =
+          'التنظيم والتظليل وربط الصوت بالسبورة: ' +
+          '(أ) لكل مشهد اكتب section_label ترتيبي ("أولاً"، "ثانياً"...) وtitle يعبر عن فكرة المشهد نفسه (مثل: "مفهوم تقييم الأداء" وليس عنوان الفصل كله). ' +
+          '(ب) التظليل: في on_screen وbullets وعناصر board وخلايا الجداول، ضع المصطلح أو الرقم أو القاعدة المحورية بين [[ ]] (من 1 إلى 3 كلمات، وبحد أقصى 3 تظليلات في المشهد). ممنوع [[ ]] داخل narration أو الحقول الرقمية أو العنوان. ' +
+          '(ج) التزامن بالعلامة ¶: قسّم narration إلى أجزاء مفصولة بالعلامة ¶ بحيث يظهر كل عنصر على السبورة لحظة نطقه: في board (جزء مقدمة قصيرة ¶ ثم جزء لكل عنصر بنفس ترتيب ظهوره: عناصر القسم الأول ثم الثاني). في problem (جزء للسؤال والجدول ¶ جزء للمطلوب ¶ جزء لكل خطوة في answers ¶ جزء للنتيجة النهائية). في cards وsteps وcompare (مقدمة ¶ جزء لكل نقطة في bullets). في formula (جزء للقانون ¶ جزء لكل نقطة في bullets). ';
+
         const prompt =
-          'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
-          'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
-          '1) النظري / المبسّط: شرح تفصيلي يغطي محتوى الملف بالترتيب، ويشمل كل التعريفات والقوانين والنظريات والمبادئ والعلاقات والاستثناءات والملاحظات المهمة الواردة في المصدر. لا تختزل التعريفات ولا تتجاوز قانونًا أو نظرية مذكورة. إذا احتوى الملف على جزء عملي أو مسألة، اشرح معناها وخطواتها أيضًا. ' +
-          '2) المكثّف: مراجعة سريعة ومركزة للنظري، مع أولوية واضحة للمسائل والأرقام والقوانين والتعويض في القوانين وخطوات الحل والأمثلة التطبيقية. اشرح خطوات الحساب ولا تذكر الناتج وحده، ولا تخترع أرقامًا أو قواعد من خارج المصدر؛ إذا أنشأت مثالًا توضيحيًا فصرّح أنه مثال توضيحي. ' +
-          '3) الشامل: فيديو مطوّل يجمع النمطين السابقين؛ يغطي النظري بالتفصيل ثم يشرح الأجزاء العملية والمسائل والأرقام والأمثلة خطوة بخطوة، مع انتقالات واضحة وخلاصة نهائية. لا تحوّله إلى ملخص قصير. ' +
-          'اعتمد على النص والصور المرفقة فقط للمعلومات الأكاديمية. لا تخترع معلومة ولا تغيّر مصطلحات الملف. إذا كان شيء غير مقروء أو غير موجود فاذكر أن المصدر لا يوضحه بدل التخمين. ' +
-          'ممنوع تمامًا تحويل المحتوى إلى كلام عام مثل "ملخص سريع" أو "من أهم النقاط" بدل شرح المادة نفسها. التعريفات يجب نقل معناها كاملًا، ومميزات/خصائص أي مفهوم يجب ذكرها نقطة نقطة كما وردت في المصدر، ولا تختزل قائمة من عدة نقاط إلى جملة واحدة. ' +
-          'لا تكتب "مثال عملي" أو example=true إلا إذا كان المصدر نفسه يحتوي فعلًا على مثال أو مسألة أو أرقام أو حالة تطبيقية واضحة. إذا لم يوجد مثال في المصدر، example=false ولا تنشئ مثالًا من عندك. وبالمثل لا تدّعِ وجود جدول إذا لم يوجد جدول. إذا وجد جدول أو مقارنة أو بيانات رقمية في المصدر، انقل البيانات الأساسية إليه في حقل table بدل وصفه بكلام عام. ' +
-          'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. حافظ على ترتيب المحاضرة. ' +
-          'أنشئ العدد المحدد من المشاهد في قواعد النمط والطلب أدناه (وإن لم يُحدد عدد فمن 10 إلى 30 حسب حجم المحتوى). يمكن للمشهد الواحد أن يغطي عدة مفاهيم مترابطة طالما لا يتم اختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت بالطول المحدد في قواعد النمط، ومدة تقديرية بالثواني = عدد كلمات السرد ÷ 2.5. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
-          'في أي مشهد عملي يحتوي أرقامًا أو جدولًا أو مسألة، يجب ربطه بصورة صفحة المصدر عبر source_image_index متى كانت الصفحة ضمن الصور المرفقة. لا تضع أي رقم في bullets أو narration إلا إذا كان ظاهرًا في النص أو الصورة. ' + 'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
-          'قبل بناء المشاهد نفّذ AI Brain داخليًا: صنّف المادة إلى تعريفات، قوائم/مميزات، قوانين وصيغ، أمثلة/مسائل، جداول/مقارنات، وأفكار نظرية. لا تُنشئ أي فئة إذا لم توجد في المصدر. أعد هذا التحليل أيضًا في حقل brain. ' +
-          'مهم جدًا: لا تكتفِ بكتابة نص على الشاشة. صمّم كل مشهد كشرح بصري تفاعلي بأسلوب دفتر/سبورة ذكية مستوحى من فكرة Notebook التعليمية، لكن بهوية JustM وتصميم مستقل. لكل مشهد اختر visual_type واحدًا من: card أو steps أو flow أو compare أو formula أو worked_example أو concept_map أو timeline أو table أو source_image أو focus. اختر النوع بناءً على طبيعة المعلومة، وليس عشوائيًا. استخدم card للتعريفات، steps للخطوات، flow للعلاقات، compare للمقارنات، formula للقوانين، worked_example للمسائل، concept_map للمفاهيم المترابطة، timeline للتسلسل الزمني، table للجداول الحقيقية، source_image عندما تكون صورة المصدر هي أفضل وسيلة، وfocus عندما تكون هناك فكرة واحدة يجب إبرازها. لا تستخدم نفس النوع لكل المشاهد المتتالية إذا كان هناك بديل أفضل. ' +
-          'لكل مشهد أضف visual_focus كجملة قصيرة تحدد بالضبط ما يجب أن تركز عليه عين الطالب في هذه اللحظة. وأضف emphasis ككلمات أو عبارات قصيرة مهمة من المصدر، وdraw_steps كمراحل قصيرة للرسم/البناء البصري إذا كان visual_type يحتاج بناءً تدريجيًا. يمكن إضافة diagram بالشكل {center,nodes:[...],relations:[...]} فقط عندما توجد علاقة مفاهيم حقيقية. لا تخترع علاقات غير موجودة في المصدر. الهدف أن تظهر المعلومة تدريجيًا مع الصوت: لا تعرض كل شيء من البداية. ' +
-          'في المشاهد العملية أو المسائل استخدم solution_steps عند توفر حل واضح، بالشكل [{step,why,calculation}]، بحيث يظهر الحل مرحلة مرحلة ويعرف الطالب لماذا انتقلنا لكل خطوة. لا تملأ هذا الحقل في المشاهد النظرية العادية. ' +
-          'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. إذا كان المشهد عمليًا أو يحتوي جدولًا/مسألة/أرقامًا وكان قائمًا على إحدى صور الصفحات المرفقة، أضف source_image_index كرقم الصورة من 0 إلى 11. لا تستخدم source_image_index إذا لم تكن الصورة مفيدة. في المشاهد العملية اعتمد على الصورة والبيانات الأصلية ولا تخترع أرقامًا. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
-          'دقة الرسم البصري إلزامية: لا تنشئ مخطط أسهم أو خريطة مفاهيم إلا إذا كانت العلاقات والاتجاهات مذكورة صراحة في المصدر؛ لا تستنتج علاقة من مجرد وجود المصطلحات معًا. إذا لم تكن العلاقات واضحة فاستخدم card أو steps بدل flow/concept_map. لا تنشئ رسومات أو جداول أو أرقامًا توضيحية من عندك. عند استخدام صورة مصدر، يجب أن تكون الصفحة التي تحتوي المعلومة نفسها، ولا تربط مشهدًا بصورة غير مرتبطة. راجع كل عنوان ونقطة وسهم ورقم مع المصدر قبل إخراج JSON. ' +
-          'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
-          'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
-          'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
-          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"calc_steps":[{"label":"...","formula":"...","numbers":"...","result":"..."}],"problem":{"statement":"...","tables":[{"title":"...","headers":["..."],"rows":[["..."]]}],"answers":[{"label":"...","formula":"...","numbers":"...","result":"..."}]},"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
+          'أنت أستاذ جامعي عربي تشرح على سبورة ذكية تفاعلية بأسلوب JustM. حوّل محتوى المحاضرة المرفقة إلى فيديو تعليمي متكامل يجمع بين الشرح الصوتي الدافئ والسبورة الغنية بالمحتوى المكتوب بوضوح. ' +
+          'الأنماط الثلاثة: (1) النظري/المبسّط: شرح تفصيلي لكل التعريفات والخصائص والقواعد والاستثناءات مكتوبة ومشروحة على السبورة. (2) المكثّف: تركيز سريع على القوانين والمسائل وخطوات الحل بالأرقام. (3) الشامل: النظري الكامل أولًا ثم العملي والمسائل بالتفصيل خطوة بخطوة. ' +
+          'اعتمد على النص والصور المرفقة فقط. لا تخترع معلومة ولا رقمًا. ممنوع الكلام الإنشائي العام مثل "من أهم النقاط"؛ اكتب المعلومة نفسها. ' +
+          'قبل بناء المشاهد نفّذ AI Brain داخليًا وصنّف المادة في حقل brain (sections, definitions, lists, formulas, examples, tables, warnings). ' +
+          'القيم المسموحة لـ visual_type هي فقط: board (لوحة مفهوم/أهمية/أنواع/شروط على سبورة واحدة، وهي الأساس للنظري)، card (تعريف واحد أو قاعدة)، cards (2-4 نقاط)، steps (خطوات أو مراحل)، compare (مقارنة بين طرفين)، table (جدول مقارنة أو تصنيف)، formula (قانون نظري)، problem (أي مسألة أو قائمة مالية بأرقام)، timeline (تسلسل زمني)، focus (تنبيه أو استثناء مهم)، source_image (صفحة مصدر مهمة). ' +
+          'احسب duration بالثواني = عدد كلمات narration ÷ 2.5. ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
+          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","section_label":"أولاً","lecture":"...","on_screen":"...","bullets":["..."],"board":{"sections":[{"label":"مفهوم","kind":"concept","items":["[[العنوان]]: الشرح"]}]},"narration":"...","duration":12,"kind":"theory","visual_type":"board","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"problem":{"statement":"...","requirement":"...","final":"...","tables":[{"title":"...","headers":["..."],"rows":[["..."]]}],"answers":[{"label":"...","formula":"...","numbers":"...","result":"..."}]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
           'الموضوع: ' + subject + '\n' +
-          modeRules + partRule + styleRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
-          'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
+          modeRules + partRule + boardRules + problemRules + examRules + lectureRules + structureRules +
+          'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
+          'مادة المحاضرة:\n' + text;
 
         const parts = [{ text: prompt }];
         for (const img of images) {
@@ -989,11 +1019,8 @@ export default {
             temperature: 0.2
           });
         } catch (firstErr) {
-          // A second, compact retry prevents a transient/truncated JSON response
-          // from turning into a useless 502. The retry explicitly asks for fewer,
-          // denser scenes while preserving all source facts.
           if (firstErr && firstErr.status === 502) {
-            const retryParts = [{ text: prompt + '\n\nإعادة محاولة تقنية: أخرج JSON صالحًا بالكامل. لا تكتب أي نص خارج JSON. اجعل عدد المشاهد 8-18 فقط، واجعل كل مشهد مركزًا لكن لا تحذف التعريفات أو القوائم أو القوانين أو خطوات الحل. إذا لم توجد أمثلة أو جداول في المصدر فلا تضفها.' }];
+            const retryParts = [{ text: prompt + '\n\nإعادة محاولة تقنية: أخرج JSON صالحًا بالكامل بدون أي نص خارجه، واجعل المشاهد مركزة مع الحفاظ على كل التعريفات والنقاط والخطوات كاملة.' }];
             for (const img of images) {
               if (img && img.mimeType && img.data) retryParts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });
             }
@@ -1007,6 +1034,7 @@ export default {
             throw firstErr;
           }
         }
+
         const clean = (v) => String(v == null ? '' : v).replace(/[*#`]/g, '').trim();
         result = result && typeof result === 'object' ? result : {};
         result.title = clean(result.title || 'شرح بالفيديو');
@@ -1014,13 +1042,13 @@ export default {
         const rawBrain = (result.brain && typeof result.brain === 'object') ? result.brain : {};
         result.brain = {
           topic: clean(rawBrain.topic || subject),
-          sections: Array.isArray(rawBrain.sections) ? rawBrain.sections.map(clean).filter(Boolean).slice(0,30) : [],
-          definitions: Array.isArray(rawBrain.definitions) ? rawBrain.definitions.map(clean).filter(Boolean).slice(0,30) : [],
-          lists: Array.isArray(rawBrain.lists) ? rawBrain.lists.map(clean).filter(Boolean).slice(0,30) : [],
-          formulas: Array.isArray(rawBrain.formulas) ? rawBrain.formulas.map(clean).filter(Boolean).slice(0,30) : [],
-          examples: Array.isArray(rawBrain.examples) ? rawBrain.examples.map(clean).filter(Boolean).slice(0,30) : [],
-          tables: Array.isArray(rawBrain.tables) ? rawBrain.tables.map(clean).filter(Boolean).slice(0,30) : [],
-          warnings: Array.isArray(rawBrain.warnings) ? rawBrain.warnings.map(clean).filter(Boolean).slice(0,30) : []
+          sections: Array.isArray(rawBrain.sections) ? rawBrain.sections.map(clean).filter(Boolean).slice(0, 30) : [],
+          definitions: Array.isArray(rawBrain.definitions) ? rawBrain.definitions.map(clean).filter(Boolean).slice(0, 30) : [],
+          lists: Array.isArray(rawBrain.lists) ? rawBrain.lists.map(clean).filter(Boolean).slice(0, 30) : [],
+          formulas: Array.isArray(rawBrain.formulas) ? rawBrain.formulas.map(clean).filter(Boolean).slice(0, 30) : [],
+          examples: Array.isArray(rawBrain.examples) ? rawBrain.examples.map(clean).filter(Boolean).slice(0, 30) : [],
+          tables: Array.isArray(rawBrain.tables) ? rawBrain.tables.map(clean).filter(Boolean).slice(0, 30) : [],
+          warnings: Array.isArray(rawBrain.warnings) ? rawBrain.warnings.map(clean).filter(Boolean).slice(0, 30) : []
         };
 
         let rawScenes = Array.isArray(result.scenes) ? result.scenes : [];
@@ -1031,49 +1059,68 @@ export default {
           for (let i = 0; i < chunks.length; i += step) {
             groups.push(chunks.slice(i, i + step).join(' '));
           }
-
           if (groups.length) {
             rawScenes = groups.slice(0, 8).map((chunk, i) => ({
               title: i === 0 ? 'مقدمة' : ('النقطة ' + (i + 1)),
-              on_screen: chunk.slice(0, 180),
+              on_screen: chunk.slice(0, 260),
+              bullets: [chunk.slice(0, 220)],
               narration: chunk,
-              duration: 8,
+              duration: 10,
+              visual_type: 'card',
               example: false
             }));
           } else {
             return jsonResponse({
               error: 'VIDEO_SCRIPT_EMPTY',
-              message: 'الـWorker استلم محتوى بدون نص قابل للتحويل إلى سيناريو.',
-              diagnostics: {
-                geminiResultType: typeof result,
-                geminiKeys: result && typeof result === 'object' ? Object.keys(result).slice(0, 30) : [],
-                scenesType: result && result.scenes != null ? typeof result.scenes : 'missing',
-                scenesCount: Array.isArray(result?.scenes) ? result.scenes.length : 0,
-                lectureTextLength: String(text || '').length,
-                imageCount: images.length,
-                responsePreview: JSON.stringify(result ?? null).slice(0, 1000)
-              }
+              message: 'الـWorker استلم محتوى بدون نص قابل للتحويل إلى سيناريو.'
             }, 502);
           }
         }
 
-        result.scenes = rawScenes.slice(0, 30).map((x, i) => {
+        const BOARD_KINDS = ['concept', 'importance', 'types', 'conditions', 'features', 'steps', 'example', 'warning', 'exam'];
+        result.scenes = rawScenes.slice(0, 40).map((x, i) => {
           x = x && typeof x === 'object' ? x : {};
           const title = clean(x.title || ('النقطة ' + (i + 1)));
-          const onScreen = clean(x.on_screen || x.title || x.explanation || title);
+          const onScreen = clean(x.on_screen || x.explanation || title);
           const narration = clean(x.narration || x.explanation || x.voiceover || x.script || onScreen || title).replace(/\[\[|\]\]/g, '');
           const sectionLabel = clean(x.section_label || '').replace(/\[\[|\]\]/g, '').slice(0, 14);
-          const bullets = Array.isArray(x.bullets) ? x.bullets.map(clean).filter(Boolean).slice(0, 6) : [];
+          const lecture = clean(x.lecture || '').replace(/\[\[|\]\]/g, '').slice(0, 90);
+          let bullets = Array.isArray(x.bullets) ? x.bullets.map(clean).filter(Boolean).slice(0, 6) : [];
           const sourceAnchor = clean(x.source_anchor || '');
-          const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0,8) : [];
-          const kind = ['theory','definition','list','formula','example','table','summary'].includes(String(x.kind)) ? String(x.kind) : 'theory';
-          const allowedVisuals = ['card','cards','steps','flow','compare','formula','worked_example','concept_map','timeline','table','source_image','focus','calc','problem'];
-          const visualType = allowedVisuals.includes(String(x.visual_type)) ? String(x.visual_type) : (kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'worked_example' : kind === 'list' ? 'steps' : 'focus');
+          const sourceFacts = Array.isArray(x.source_facts) ? x.source_facts.map(clean).filter(Boolean).slice(0, 8) : [];
+          const kind = ['theory', 'definition', 'list', 'formula', 'example', 'table', 'summary', 'exam'].includes(String(x.kind)) ? String(x.kind) : 'theory';
+
+          // سبورة كاملة: أقسام (مفهوم/أهمية/أنواع...) على لوحة واحدة، عناصرها مرقمة في الواجهة
+          let board = null;
+          if (x.board && typeof x.board === 'object' && Array.isArray(x.board.sections)) {
+            let left = 8;
+            const secs = [];
+            for (const s of x.board.sections.slice(0, 3)) {
+              if (!s || typeof s !== 'object' || left <= 0) continue;
+              const items = (Array.isArray(s.items) ? s.items : []).map(clean).filter(Boolean).slice(0, Math.min(5, left));
+              if (!items.length) continue;
+              left -= items.length;
+              secs.push({
+                label: clean(s.label || '').replace(/\[\[|\]\]/g, '').slice(0, 30) || 'مفهوم',
+                kind: BOARD_KINDS.includes(String(s.kind)) ? String(s.kind) : (kind === 'exam' ? 'exam' : 'features'),
+                items
+              });
+            }
+            if (secs.length) board = { sections: secs };
+          }
+          if (board && !bullets.length) bullets = board.sections.reduce((a, s) => a.concat(s.items), []).slice(0, 6);
+
+          const allowedVisuals = ['board', 'card', 'cards', 'steps', 'compare', 'formula', 'timeline', 'table', 'source_image', 'focus', 'problem'];
+          let visualType = allowedVisuals.includes(String(x.visual_type))
+            ? String(x.visual_type)
+            : (board ? 'board' : kind === 'definition' ? 'card' : kind === 'formula' ? 'formula' : kind === 'table' ? 'table' : kind === 'example' ? 'problem' : bullets.length >= 2 ? 'cards' : 'card');
+          if (board && ['card', 'cards', 'steps', 'focus'].includes(visualType)) visualType = 'board';
+          if (visualType === 'board' && !board) visualType = bullets.length >= 2 ? 'cards' : 'card';
+
           const visualFocus = clean(x.visual_focus || x.title || '');
-          const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0,8) : [];
-          const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0,8) : [];
-          const solutionSteps = Array.isArray(x.solution_steps) ? x.solution_steps.slice(0,8).map((z) => ({ step: clean(z?.step || ''), why: clean(z?.why || ''), calculation: clean(z?.calculation || '') })).filter((z) => z.step || z.why || z.calculation) : [];
-          const calcSteps = Array.isArray(x.calc_steps) ? x.calc_steps.slice(0,4).map((z) => ({ label: clean(z?.label || ''), formula: clean(z?.formula || ''), numbers: clean(z?.numbers || ''), result: clean(z?.result || '') })).filter((z) => z.label && (z.numbers || z.result)) : [];
+          const emphasis = Array.isArray(x.emphasis) ? x.emphasis.map(clean).filter(Boolean).slice(0, 8) : [];
+          const drawSteps = Array.isArray(x.draw_steps) ? x.draw_steps.map(clean).filter(Boolean).slice(0, 8) : [];
+
           let problem = null;
           if (x.problem && typeof x.problem === 'object') {
             const pTables = (Array.isArray(x.problem.tables) ? x.problem.tables : []).slice(0, 3).map((t) => ({
@@ -1087,40 +1134,36 @@ export default {
             const pStatement = clean(x.problem.statement || '').slice(0, 1200);
             const pRequirement = clean(x.problem.requirement || '').slice(0, 500);
             const pFinal = clean(x.problem.final || '').slice(0, 300);
-            if (pStatement || pRequirement || pTables.length || pAnswers.length) problem = { statement: pStatement, requirement: pRequirement, final: pFinal, tables: pTables, answers: pAnswers };
+            if (pStatement || pRequirement || pTables.length || pAnswers.length) {
+              problem = { statement: pStatement, requirement: pRequirement, final: pFinal, tables: pTables, answers: pAnswers };
+            }
           }
-          let diagram = null;
-          if (x.diagram && typeof x.diagram === 'object') {
-            const center = clean(x.diagram.center || '');
-            const nodes = Array.isArray(x.diagram.nodes) ? x.diagram.nodes.map(clean).filter(Boolean).slice(0,8) : [];
-            const relations = Array.isArray(x.diagram.relations) ? x.diagram.relations.map(clean).filter(Boolean).slice(0,8) : [];
-            if (center || nodes.length) diagram = { center, nodes, relations };
-          }
+
           let table = null;
           if (x.table && typeof x.table === 'object' && Array.isArray(x.table.headers) && Array.isArray(x.table.rows)) {
             table = {
-              headers: x.table.headers.map(clean).filter(Boolean).slice(0, 4),
-              rows: x.table.rows.slice(0, 6).map(r => Array.isArray(r) ? r.map(clean).slice(0, 4) : []).filter(r => r.length)
+              headers: x.table.headers.map(clean).filter(Boolean).slice(0, 5),
+              rows: x.table.rows.slice(0, 10).map(r => Array.isArray(r) ? r.map(clean).slice(0, 5) : []).filter(r => r.length)
             };
             if (!table.headers.length || !table.rows.length) table = null;
           }
+
           return {
             title,
             ...(sectionLabel ? { section_label: sectionLabel } : {}),
+            ...(lecture ? { lecture } : {}),
             on_screen: onScreen,
             bullets,
+            ...(board ? { board } : {}),
             narration,
-            duration: Math.max(5, Math.min(300, Number(x.duration) || 8)),
+            duration: Math.max(5, Math.min(300, Number(x.duration) || 10)),
             kind,
             visual_type: visualType,
             ...(visualFocus ? { visual_focus: visualFocus } : {}),
             ...(emphasis.length ? { emphasis } : {}),
             ...(drawSteps.length ? { draw_steps: drawSteps } : {}),
-            ...(solutionSteps.length ? { solution_steps: solutionSteps } : {}),
-            ...(calcSteps.length ? { calc_steps: calcSteps } : {}),
             ...(problem ? { problem } : {}),
-            ...(diagram ? { diagram } : {}),
-            example: !!x.example,
+            example: !!x.example || visualType === 'problem',
             ...(sourceAnchor ? { source_anchor: sourceAnchor } : {}),
             ...(sourceFacts.length ? { source_facts: sourceFacts } : {}),
             ...(Number.isFinite(Number(x.source_image_index)) ? { source_image_index: Math.max(0, Math.min(images.length - 1, Number(x.source_image_index))) } : {}),
@@ -1129,16 +1172,7 @@ export default {
         }).filter(x => x.narration);
 
         if (!result.scenes.length) {
-          return jsonResponse({
-            error: 'VIDEO_NARRATION_EMPTY',
-            message: 'Gemini رجّع مشاهد، لكن لم يوجد نص شرح قابل للاستخدام.',
-            diagnostics: {
-              sceneCount: rawScenes.length,
-              firstSceneKeys: rawScenes[0] && typeof rawScenes[0] === 'object' ? Object.keys(rawScenes[0]).slice(0, 30) : [],
-              lectureTextLength: String(text || '').length,
-              imageCount: images.length
-            }
-          }, 502);
+          return jsonResponse({ error: 'VIDEO_NARRATION_EMPTY', message: 'لم يوجد نص شرح قابل للاستخدام.' }, 502);
         }
         return jsonResponse(result);
       }
