@@ -1,6 +1,12 @@
 name = "justm-quiz"
-main = "worker.js"
+main = "quiz-worker.js"
 compatibility_date = "2025-01-01"
+keep_vars = true
+
+[vars]
+GEMINI_MODEL = "gemini-4-hydrogen"
+GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+CLOUDINARY_CLOUD_NAME = "mgfqlllc"
 
 [[kv_namespaces]]
 binding = "QUIZ_KV"
