@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v6.1-board-lessons-fill-tables';
+const BUILD_VERSION = 'v6.2-status-stability';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -501,8 +501,30 @@ function extractJsonObject(text) {
   throw err;
 }
 
+const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash-lite';
+
+// Health of the Gemini key as seen by real calls + the ping below (cached in KV for ~45s).
+function classifyAiHealth(status, errText) {
+  const t = String(errText || '');
+  if (status === 200) return { state: 'available', reason: '' };
+  if (status === 429 || /RESOURCE_EXHAUSTED|quota/i.test(t)) return { state: 'unavailable', reason: 'quota' };
+  if (status === 400 && /API key|API_KEY_INVALID/i.test(t)) return { state: 'unavailable', reason: 'key' };
+  if (status === 401 || status === 403) return { state: 'unavailable', reason: 'key' };
+  if (status === 0) return { state: 'unavailable', reason: 'network' };
+  if ([500, 502, 503, 504, 524].includes(status)) return { state: 'busy', reason: 'overloaded' };
+  return { state: 'unavailable', reason: 'error' };
+}
+async function recordAiHealth(env, ok, status, errText) {
+  try {
+    if (!env.QUIZ_KV) return;
+    const c = classifyAiHealth(ok ? 200 : status, errText);
+    await env.QUIZ_KV.put('ai_health', JSON.stringify({ t: Date.now(), state: c.state, reason: c.reason, status: status || 0 }), { expirationTtl: 3600 });
+  } catch (_) {}
+}
+
 async function callGemini(env, parts, extraConfig) {
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const urlFor = (m) => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
+  let apiUrl = urlFor(GEMINI_MODEL);
   const config = Object.assign({ responseMimeType: 'application/json' }, extraConfig || {});
   const requestBody = JSON.stringify({
     contents: [{ role: 'user', parts }],
@@ -514,8 +536,10 @@ async function callGemini(env, parts, extraConfig) {
   // Do not retry permanent 4xx errors (except temporary rate limiting).
   let apiResponse = null;
   let lastTransientStatus = 0;
-  const maxAttempts = 2; // initial attempt + one retry, to avoid duplicate long generations
+  const maxAttempts = 4; // 3 tries on the main model with growing waits, then 1 try on the fallback model
+  const backoff = [1500, 4000, 0];
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt === maxAttempts - 1) apiUrl = urlFor(GEMINI_FALLBACK_MODEL);
     try {
       apiResponse = await fetch(apiUrl, {
         method: 'POST',
@@ -526,7 +550,7 @@ async function callGemini(env, parts, extraConfig) {
       if (attempt + 1 >= maxAttempts) {
         throw Object.assign(new Error('تعذّر الاتصال بخدمة Gemini مؤقتًا. التقدم المحفوظ آمن؛ اضغط «استكمال» بعد قليل.'), { status: 503 });
       }
-      await new Promise(resolve => setTimeout(resolve, 900));
+      await new Promise(resolve => setTimeout(resolve, backoff[attempt] || 900));
       continue;
     }
     if (apiResponse.ok) break;
@@ -535,13 +559,14 @@ async function callGemini(env, parts, extraConfig) {
     if (!retryable || attempt + 1 >= maxAttempts) break;
     // Consume body before retrying so the response connection can be released.
     try { await apiResponse.text(); } catch (_) {}
-    await new Promise(resolve => setTimeout(resolve, apiResponse.status === 429 ? 1400 : 900));
+    await new Promise(resolve => setTimeout(resolve, (backoff[attempt] || 900) + (apiResponse.status === 429 ? 1500 : 0)));
   }
 
   if (!apiResponse || !apiResponse.ok) {
     const status = apiResponse ? apiResponse.status : lastTransientStatus;
     let errText = '';
     try { errText = apiResponse ? await apiResponse.text() : ''; } catch (_) {}
+    await recordAiHealth(env, false, status, errText);
     if (status === 524 || status === 504 || status === 502 || status === 503) {
       const err = new Error('خدمة Gemini اتأخرت أو انتهت مهلة الاتصال (HTTP ' + status + '). التقدم محفوظ؛ انتظر قليلًا ثم اضغط «استكمال» لإعادة المحاولة من المرحلة المتوقفة.');
       err.status = 503;
@@ -624,6 +649,7 @@ async function uploadGeneratedVideoToCloudinary(env, request) {
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
+    if (request.method === 'GET') return new Response(JSON.stringify({ build: BUILD_VERSION, video_explain_prompt: PROMPT_VERSIONS.video_explain }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
 
     if (request.headers.get('X-JustM-Action') === 'generated_video_upload') {
@@ -693,7 +719,7 @@ export default {
         return jsonResponse({ videos: Array.isArray(list) ? list : [] });
       }
 
-      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary', 'video_explain', 'video_tts', 'video_publish', 'video_unpublish', 'design_summary'];
+      const OWNER_ONLY_MODES = ['get_ai_log', 'get_banned', 'ban_user', 'unban_user', 'ai_status', 'video_env_check', 'video_start', 'video_poll', 'video_generate', 'course_level_summary', 'video_explain', 'video_tts', 'video_publish', 'video_unpublish', 'design_summary'];
       if (OWNER_ONLY_MODES.includes(mode)) {
         // FIX: these four used to run with no check at all. Now the Worker
         // verifies the caller's Firebase ID token itself and requires the
@@ -895,6 +921,24 @@ export default {
 
       // ---- AI explainer video script ------------------------------
       // ---- owner-only: design a JustM-style study sheet from lecture text / photos ----
+      if (mode === 'ai_status') {
+        let cached = null;
+        try { if (env.QUIZ_KV && !body.force) cached = JSON.parse((await env.QUIZ_KV.get('ai_health')) || 'null'); } catch (_) {}
+        if (cached && Date.now() - cached.t < 45000) return jsonResponse({ build: BUILD_VERSION, state: cached.state, reason: cached.reason, checked_at: cached.t, cached: true });
+        let status = 0, errText = '';
+        try {
+          const pr = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 4 } })
+          });
+          status = pr.status;
+          if (!pr.ok) { try { errText = await pr.text(); } catch (_) {} }
+        } catch (_) { status = 0; }
+        const c = classifyAiHealth(status, errText);
+        try { if (env.QUIZ_KV) await env.QUIZ_KV.put('ai_health', JSON.stringify({ t: Date.now(), state: c.state, reason: c.reason, status }), { expirationTtl: 3600 }); } catch (_) {}
+        return jsonResponse({ build: BUILD_VERSION, state: c.state, reason: c.reason, checked_at: Date.now(), cached: false });
+      }
       if (mode === 'design_summary') {
         const text = String(body.text || '').trim().slice(0, 60000);
         const images = Array.isArray(body.images) ? body.images.slice(0, 12) : [];
