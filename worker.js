@@ -17,7 +17,7 @@
 
 const ALLOWED_ORIGIN = 'https://justm.site';
 const BUILD_VERSION = 'v6.2-status-stability';
-const GEMINI_MODEL = 'gemini-2.5-flash';
+let GEMINI_MODEL = 'gemini-2.5-flash'; // override without editing code: add a Worker variable GEMINI_MODEL (e.g. gemini-4-hydrogen)
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
 // V20.2.1 generated-video download:
@@ -501,7 +501,7 @@ function extractJsonObject(text) {
   throw err;
 }
 
-const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash-lite';
+const GEMINI_FALLBACK_MODEL_DEFAULT = 'gemini-3.5-flash-lite';
 
 // Health of the Gemini key as seen by real calls + the ping below (cached in KV for ~45s).
 function classifyAiHealth(status, errText) {
@@ -524,7 +524,8 @@ async function recordAiHealth(env, ok, status, errText) {
 
 async function callGemini(env, parts, extraConfig) {
   const urlFor = (m) => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
-  let apiUrl = urlFor(GEMINI_MODEL);
+  const fallbackModel = (env && env.GEMINI_FALLBACK_MODEL) || GEMINI_FALLBACK_MODEL_DEFAULT;
+  let apiUrl = urlFor(GEMINI_MODEL), primaryErr = null;
   const config = Object.assign({ responseMimeType: 'application/json' }, extraConfig || {});
   const requestBody = JSON.stringify({
     contents: [{ role: 'user', parts }],
@@ -539,7 +540,7 @@ async function callGemini(env, parts, extraConfig) {
   const maxAttempts = 4; // 3 tries on the main model with growing waits, then 1 try on the fallback model
   const backoff = [1500, 4000, 0];
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt === maxAttempts - 1) apiUrl = urlFor(GEMINI_FALLBACK_MODEL);
+    if (attempt === maxAttempts - 1) apiUrl = urlFor(fallbackModel);
     try {
       apiResponse = await fetch(apiUrl, {
         method: 'POST',
@@ -558,14 +559,15 @@ async function callGemini(env, parts, extraConfig) {
     const retryable = [429, 500, 502, 503, 504, 524].includes(apiResponse.status);
     if (!retryable || attempt + 1 >= maxAttempts) break;
     // Consume body before retrying so the response connection can be released.
-    try { await apiResponse.text(); } catch (_) {}
+    try { primaryErr = { status: apiResponse.status, text: await apiResponse.text() }; } catch (_) {}
     await new Promise(resolve => setTimeout(resolve, (backoff[attempt] || 900) + (apiResponse.status === 429 ? 1500 : 0)));
   }
 
   if (!apiResponse || !apiResponse.ok) {
-    const status = apiResponse ? apiResponse.status : lastTransientStatus;
+    let status = apiResponse ? apiResponse.status : lastTransientStatus;
     let errText = '';
     try { errText = apiResponse ? await apiResponse.text() : ''; } catch (_) {}
+    if (primaryErr && apiUrl !== urlFor(GEMINI_MODEL)) { status = primaryErr.status; errText = primaryErr.text; }
     await recordAiHealth(env, false, status, errText);
     if (status === 524 || status === 504 || status === 502 || status === 503) {
       const err = new Error('خدمة Gemini اتأخرت أو انتهت مهلة الاتصال (HTTP ' + status + '). التقدم محفوظ؛ انتظر قليلًا ثم اضغط «استكمال» لإعادة المحاولة من المرحلة المتوقفة.');
@@ -648,6 +650,7 @@ async function uploadGeneratedVideoToCloudinary(env, request) {
 
 export default {
   async fetch(request, env) {
+    if (env && env.GEMINI_MODEL) GEMINI_MODEL = String(env.GEMINI_MODEL).trim();
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
     if (request.method === 'GET') return new Response(JSON.stringify({ build: BUILD_VERSION, video_explain_prompt: PROMPT_VERSIONS.video_explain }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
