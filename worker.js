@@ -16,7 +16,7 @@
 //    isn't enabled, those calls will fail with an auth error.
 
 const ALLOWED_ORIGIN = 'https://justm.site';
-const BUILD_VERSION = 'v6.2-status-stability';
+const BUILD_VERSION = 'v6.3-board-only';
 let GEMINI_MODEL = 'gemini-2.5-flash'; // override without editing code: add a Worker variable GEMINI_MODEL (e.g. gemini-4-hydrogen)
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -252,7 +252,7 @@ const DESIGN_SUMMARY_SCHEMA = {
   required: ['title', 'sections']
 };
 
-const PROMPT_VERSIONS = { video_script: '5', video_explain: '17', video_brain: '3' };
+const PROMPT_VERSIONS = { video_script: '5', video_explain: '18', video_brain: '3' };
 
 async function callGeminiText(env, parts) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -347,6 +347,54 @@ async function deleteGeminiFile(env, name) {
     await fetch(`${GEMINI_FILES_BASE}/v1beta/${name}`, { method: 'DELETE', headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
   } catch (e) { /* best effort - files auto-expire after 48h anyway */ }
 }
+
+// Board-only schema (v6.3): `board` and each block's `say` are REQUIRED so the model cannot fall back to plain cards.
+const BOARD_ITEM_SCHEMA = { type: 'OBJECT', properties: { icon: { type: 'STRING' }, label: { type: 'STRING' }, text: { type: 'STRING' }, eq: { type: 'STRING' }, say: { type: 'STRING' } }, required: ['label', 'say'] };
+const BOARD_BLOCK_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    type: { type: 'STRING' },
+    icon: { type: 'STRING' },
+    title: { type: 'STRING' },
+    badge: { type: 'STRING' },
+    text: { type: 'STRING' },
+    say: { type: 'STRING' },
+    say2: { type: 'STRING' },
+    formula: { type: 'STRING' },
+    items: { type: 'ARRAY', items: BOARD_ITEM_SCHEMA },
+    table: { type: 'OBJECT', properties: { headers: { type: 'ARRAY', items: { type: 'STRING' } }, rows: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } } } },
+    fill: {
+      type: 'OBJECT',
+      properties: {
+        headers: { type: 'ARRAY', items: { type: 'STRING' } },
+        rows_before: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } },
+        rows_final: { type: 'ARRAY', items: { type: 'ARRAY', items: { type: 'STRING' } } },
+        steps: { type: 'ARRAY', items: { type: 'OBJECT', properties: { col: { type: 'NUMBER' }, label: { type: 'STRING' }, formula: { type: 'STRING' }, cells: { type: 'ARRAY', items: { type: 'STRING' } } } } }
+      }
+    }
+  },
+  required: ['type', 'title', 'say']
+};
+const BOARD_SCRIPT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    title: { type: 'STRING' },
+    scenes: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING' },
+          section_label: { type: 'STRING' },
+          source_image_index: { type: 'NUMBER' },
+          board: { type: 'ARRAY', items: BOARD_BLOCK_SCHEMA }
+        },
+        required: ['title', 'board']
+      }
+    }
+  },
+  required: ['title', 'scenes']
+};
 
 const VIDEO_SCRIPT_RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -1033,30 +1081,41 @@ export default {
         const beatRules = 'ربط الصوت بالشاشة (مهم جدًا حتى لا يسبق الكلام الكتابة): اكتب narration مقسّمًا إلى أجزاء مفصولة بالعلامة ¶ (علامة الفقرة) تمامًا، والجزء الواحد هو ما يقوله المدرّس وهو يشير إلى عنصر واحد على الشاشة، بحيث لا يتحدث عن عنصر قبل جزئه. في مشاهد problem: جزء أول يقرأ السؤال ويصف الجدول وأرقامه، ثم جزء للمطلوب، ثم جزء لكل خطوة في answers بنفس ترتيبها (القانون بالكلام ثم الأرقام ثم الناتج)، ثم جزء أخير للنتيجة النهائية؛ فعدد الأجزاء = عدد اللوحات (سؤال + مطلوب + عدد answers + نتيجة نهائية). في مشاهد cards وsteps وcompare وflow وtimeline: جزء مقدمة قصير ثم جزء لكل نقطة من bullets بنفس الترتيب. في calc: جزء لكل خطوة. في المشاهد البسيطة (card وfocus وsource_image) يمكن جزء واحد أو اثنان. لا تكتب علامة ¶ في أي مكان آخر ولا تبدأ بها ولا تكررها. ';
         const boardRules = 'أسلوب سبورة المدرس بطريقة ملفات JustM (هذه القاعدة هي الأقوى وتلغي أي قاعدة سابقة تخص أنواع العرض مثل problem وcalc وworked_example): استخدم visual_type="board" في كل مشهد شرح، وأضف الحقل board: مصفوفة من 2 إلى 5 لوحات (blocks) بترتيب تدريس المدرس، وهذا هو ما يُكتب على الشاشة سطرًا سطرًا بينما يشرح المدرس شفهيًا. اكتب المعلومة نفسها على الشاشة وليس عنوانها فقط: التعريف يُكتب في text بصيغة مختصرة وواضحة (حتى 40 كلمة) مع الكلمة المهمة بين [[ ]]، وكل نقطة في items تُكتب label (عنوان قصير 2 إلى 8 كلمات) وtext (شرح من سطر أو سطرين) وليس عنوانًا وحده. أما الشرح الموسّع والأسباب والأمثلة والتشبيهات فتقال شفهيًا في حقول say. أنواع type المسموحة: definition (تعريف، برتقالي)، info (معلومة، أزرق)، warning (تنبيه/عيوب/أخطاء شائعة، أحمر)، example (مثال/فوائد/نتائج، أخضر)، note (ملاحظة، أصفر)، summary (أهداف/استخدامات/خلاصة، بنفسجي)، question (نص مسألة)، steps (خطوات الحل)، formula (قانون)، table (جدول مقارنة أو بيانات)، fill (جدول ناقص يُكمَّل خطوة خطوة). لكل لوحة: title عنوان قصير يتضمن العدد إن وُجد (مثل: استخدامات جداول الحياة (3 استخدامات))، وbadge اختياري ("مهم" أو "مهم جداً" أو "مهم للامتحان") لما يتوقع أن يأتي في الامتحان، وsay: ما يقوله المدرس عند ظهور اللوحة (من 25 إلى 70 كلمة)، وitems لأنواع الصناديق، وsay داخل كل item: ما يقوله عن النقطة (من 20 إلى 60 كلمة) ويزيد على المكتوب ولا يكرره حرفيًا. للجدول: table {headers,rows} (حتى 10 صفوف و5 أعمدة، والعمود الأول اسم العنصر، وضع [[ ]] على 1-2 خلية مهمة) وحقل say2 يشرح الجدول صفًا صفًا (من 40 إلى 120 كلمة). للقانون: formula نص القانون بالرموز أو الكلمات، وtitle اسم القانون (مثل: دالة كينز) ثم لوحة table تشرح كل رمز (الرمز | المسمى | العلاقة). لا تكتب narration في مشاهد board (يُبنى تلقائيًا من say)، واترك bullets فارغة. المسائل الحسابية تُبنى بهذا الترتيب كما في ملفات JustM: (1) question: نص المسألة بالمعطيات والمطلوب، (2) table: جدول المعطيات، (3) formula: القانون المستخدم، (4) steps: خطوات الحل، كل خطوة item فيها label اسم ما نحسبه وeq المعادلة بالأرقام فقط (أرقام ورموز + − × ÷ = ولا حروف عربية، مثل: 2,000 = 1,000 + 1,000) وsay تشرح، (5) table: جدول النتيجة والقرار النهائي. وإن كان المصدر يعرض الحل فقط دون سؤال فأعد بناء السؤال والمعطيات من أرقام الحل نفسها كأنك المدرس دون إضافة أي رقم غير موجود في المصدر. راجع كل حساب مرتين وصحّح أي رقم لا يطابق المصدر. للجداول التي يطلب المصدر إكمالها أو التي تُحسب خانة خانة (مثل جدول الحياة) استخدم fill: headers، وrows_before هو الجدول كما أُعطي والخانات المجهولة فيه "....", وrows_final هو الجدول بعد الإكمال كاملًا، وsteps: لكل عمود مجهول عنصر {col (رقم العمود يبدأ من 0), label اسم العمود, formula قانونه, cells: مصفوفة معادلات رقمية لكل صف من الصفوف بنفس ترتيبها (مثل: 76291 = 76718 − 427، واترك الخانة المعطاة أصلًا فارغة)}، وsay تقدّم الجدول وsay2 تشرح ترتيب الإكمال والقانون. لا تتجاوز 12 صفًا. ممنوع اختراع أرقام أو إخراج معادلة غير صحيحة حسابيًا. نوّع اللوحات داخل المشهد ولا تكتب أكثر من 130 كلمة مكتوبة على الشاشة في المشهد الواحد؛ ولا تقل في say شيئًا غير موجود في معنى المصدر. يجوز مشهد خريطة مفاهيم واحد (flow) في بداية كل قسم بعقد قصيرة ثم تتبعه مشاهد board تكتب مضمون كل عقدة. ';
         const styleRules = structureRules + highlightRules + calcRules + problemRules + beatRules + boardRules + 'قواعد الشكل: (1) لما المشهد بيشرح مكونات أو أجزاء أو أنواع أو خطوات متتابعة (من 3 إلى 4 عناصر) استخدم visual_type="cards" واكتب كل عنصر في bullets بصيغة «العنوان: شرح قصير جملة أو جملتين»، بدل ما تحط كل حاجة في concept_map. (2) لما فيه مقارنة بين شيئين استخدم "compare" أو "table" بدل النص. (3) في المسائل والأمثلة العملية استخدم "worked_example" واكتب كل خطوة في solution مع step وwhy وcalculation، وفي calculation اكتب العملية الحسابية بالأرقام الفعلية خطوة خطوة (مثال: 500 + 300 + 200 = 1,000) وقول في السرد المجموع جه إزاي ومن أنهي أرقام، ولا تقفز للناتج النهائي من غير ما توضح الحساب. (3.1) في الحسابات المباشرة اكتب في bullets أو solution كل بند ورقمه، وفي السرد قل القانون بالكلام ثم الأرقام ثم الناتج، وراجع المجاميع والفروق مرتين قبل ما تكتبها. (4) نوّع بين أنواع العرض ولا تستخدم نفس النوع في أكتر من مشهدين ورا بعض. ';
+        const LEN_BY_MODE = {
+          theory: 'نظري مبسّط: اشرح كل فكرة بوضوح لكن لا تختصر المكتوب على السبورة. السرد الكلي (مجموع كل say) لكل مشهد من 170 إلى 280 كلمة.',
+          intensive: 'مكثّف: أولوية للقوانين والأرقام والمسائل وخطوات الحل، مع نظري مركّز لا يُسقط التعريفات. السرد الكلي لكل مشهد من 150 إلى 260 كلمة.',
+          comprehensive: 'شامل: تفصيل كامل بلا تلخيص مثل مدرّس يشرح حصة كاملة. السرد الكلي لكل مشهد من 220 إلى 380 كلمة، والمسائل والجداول بالتفصيل خطوة خطوة.'
+        };
+        const lenRule = LEN_BY_MODE[explainMode] || LEN_BY_MODE.comprehensive;
+        const focusMode = ['theory', 'practical'].includes(body.focus) ? body.focus : 'all';
+        const focusRule = focusMode === 'theory'
+          ? 'نطاق هذا الفيديو: النظري فقط. اكتب كل التعريفات والمفاهيم والقوائم والنظريات والمقارنات والعيوب والمميزات بالتفصيل بلا إسقاط أي معلومة، واستخدم لوحات definition وinfo وwarning وsummary وflow وtable للمقارنة. لا تحلّ مسائل رقمية ولا جداول حسابية (تُشرح في فيديو منفصل للعملي). '
+          : focusMode === 'practical'
+          ? 'نطاق هذا الفيديو: العملي فقط. اشرح كل مسألة ومثال محلول وقانون وجدول حسابي موجود في المصدر خطوة بخطوة بترتيب (question ثم table ثم formula ثم steps ثم جدول النتيجة)، وجداول fill للمطلوب إكماله. لا تشرح النظري المجرد إلا بجملة تمهيد قصيرة لكل مسألة. '
+          : '';
+        const hasTarget = Number.isFinite(parseInt(body.scene_target, 10));
+        const countRule = hasTarget && partTotal === 1
+          ? ('اكتب حوالي ' + Math.max(3, sceneTarget) + ' مشاهد، كل مشهد طويل وعميق (لا مشاهد قصيرة).')
+          : partTotal > 1
+          ? ('هذه الدفعة جزء من محاضرة أطول مقسمة على ' + partTotal + ' دفعات: اكتب ' + Math.max(2, sceneTarget) + ' مشاهد لهذه الدفعة فقط، كل مشهد طويل وعميق (لا مشاهد قصيرة).')
+          : 'اجعل عدد المشاهد من 5 إلى 14 حسب حجم المحتوى، كل مشهد طويل وعميق ويغطي قسمًا كاملًا أو فكرة كاملة (لا مشاهد قصيرة ولا تقطيع زائد).';
         const prompt =
-          'أنت أستاذ جامعي عربي وخبير في تصميم فيديوهات تعليمية. حوّل محتوى الملف المرفق إلى فيديو عربي دقيق ومفيد، والتزم بنوع الشرح المحدد في طلب الطالب. ' +
-          'هناك ثلاثة أنماط فقط ويجب تنفيذ النمط المختار حرفيًا: ' +
-          '1) النظري / المبسّط: شرح تفصيلي يغطي محتوى الملف بالترتيب، ويشمل كل التعريفات والقوانين والنظريات والمبادئ والعلاقات والاستثناءات والملاحظات المهمة الواردة في المصدر. لا تختزل التعريفات ولا تتجاوز قانونًا أو نظرية مذكورة. إذا احتوى الملف على جزء عملي أو مسألة، اشرح معناها وخطواتها أيضًا. ' +
-          '2) المكثّف: مراجعة سريعة ومركزة للنظري، مع أولوية واضحة للمسائل والأرقام والقوانين والتعويض في القوانين وخطوات الحل والأمثلة التطبيقية. اشرح خطوات الحساب ولا تذكر الناتج وحده، ولا تخترع أرقامًا أو قواعد من خارج المصدر؛ إذا أنشأت مثالًا توضيحيًا فصرّح أنه مثال توضيحي. ' +
-          '3) الشامل: فيديو مطوّل يجمع النمطين السابقين؛ يغطي النظري بالتفصيل ثم يشرح الأجزاء العملية والمسائل والأرقام والأمثلة خطوة بخطوة، مع انتقالات واضحة وخلاصة نهائية. لا تحوّله إلى ملخص قصير. ' +
-          'اعتمد على النص والصور المرفقة فقط للمعلومات الأكاديمية. لا تخترع معلومة ولا تغيّر مصطلحات الملف. إذا كان شيء غير مقروء أو غير موجود فاذكر أن المصدر لا يوضحه بدل التخمين. ' +
-          'ممنوع تمامًا تحويل المحتوى إلى كلام عام مثل "ملخص سريع" أو "من أهم النقاط" بدل شرح المادة نفسها. التعريفات يجب نقل معناها كاملًا، ومميزات/خصائص أي مفهوم يجب ذكرها نقطة نقطة كما وردت في المصدر، ولا تختزل قائمة من عدة نقاط إلى جملة واحدة. ' +
-          'لا تكتب "مثال عملي" أو example=true إلا إذا كان المصدر نفسه يحتوي فعلًا على مثال أو مسألة أو أرقام أو حالة تطبيقية واضحة. إذا لم يوجد مثال في المصدر، example=false ولا تنشئ مثالًا من عندك. وبالمثل لا تدّعِ وجود جدول إذا لم يوجد جدول. إذا وجد جدول أو مقارنة أو بيانات رقمية في المصدر، انقل البيانات الأساسية إليه في حقل table بدل وصفه بكلام عام. ' +
-          'اكتب بالعربية الواضحة، ويمكن إبقاء المصطلح الإنجليزي بين قوسين عند الحاجة. حافظ على ترتيب المحاضرة. ' +
-          'أنشئ العدد المحدد من المشاهد في قواعد النمط والطلب أدناه (وإن لم يُحدد عدد فمن 10 إلى 30 حسب حجم المحتوى). يمكن للمشهد الواحد أن يغطي عدة مفاهيم مترابطة طالما لا يتم اختصار التعريف أو إسقاط نقاط. كل مشهد يحتوي عنوانًا، ونقاطًا واضحة على الشاشة، وسردًا عربيًا كاملًا يصلح للصوت بالطول المحدد في قواعد النمط، ومدة تقديرية بالثواني = عدد كلمات السرد ÷ 2.5. اجعل السرد هو الشرح الفعلي وليس مجرد قراءة العناوين. ' +
-          'في أي مشهد عملي يحتوي أرقامًا أو جدولًا أو مسألة، يجب ربطه بصورة صفحة المصدر عبر source_image_index متى كانت الصفحة ضمن الصور المرفقة. لا تضع أي رقم في bullets أو narration إلا إذا كان ظاهرًا في النص أو الصورة. ' + 'في المسائل اكتب المعطيات والقانون والتعويض والحساب والنتيجة والتفسير إن كانت متاحة في المصدر، وبنفس الأرقام. لا تسقط الوحدات أو الإشارات أو الأرقام. في التعريفات اذكر التعريف كاملًا، وفي التصنيفات اذكر عناصر التصنيف، وفي المميزات اذكر كل ميزة مهمة وردت في المصدر. ابدأ بمقدمة قصيرة وانتهِ بخلاصة حقيقية للمادة. ' +
-          'قبل بناء المشاهد نفّذ AI Brain داخليًا: صنّف المادة إلى تعريفات، قوائم/مميزات، قوانين وصيغ، أمثلة/مسائل، جداول/مقارنات، وأفكار نظرية. لا تُنشئ أي فئة إذا لم توجد في المصدر. أعد هذا التحليل أيضًا في حقل brain. ' +
-          'مهم جدًا: لا تكتفِ بكتابة نص على الشاشة. صمّم كل مشهد كشرح بصري تفاعلي بأسلوب دفتر/سبورة ذكية مستوحى من فكرة Notebook التعليمية، لكن بهوية JustM وتصميم مستقل. لكل مشهد اختر visual_type واحدًا من: card أو steps أو flow أو compare أو formula أو worked_example أو concept_map أو timeline أو table أو source_image أو focus. اختر النوع بناءً على طبيعة المعلومة، وليس عشوائيًا. استخدم card للتعريفات، steps للخطوات، flow للعلاقات، compare للمقارنات، formula للقوانين، worked_example للمسائل، concept_map للمفاهيم المترابطة، timeline للتسلسل الزمني، table للجداول الحقيقية، source_image عندما تكون صورة المصدر هي أفضل وسيلة، وfocus عندما تكون هناك فكرة واحدة يجب إبرازها. لا تستخدم نفس النوع لكل المشاهد المتتالية إذا كان هناك بديل أفضل. ' +
-          'لكل مشهد أضف visual_focus كجملة قصيرة تحدد بالضبط ما يجب أن تركز عليه عين الطالب في هذه اللحظة. وأضف emphasis ككلمات أو عبارات قصيرة مهمة من المصدر، وdraw_steps كمراحل قصيرة للرسم/البناء البصري إذا كان visual_type يحتاج بناءً تدريجيًا. يمكن إضافة diagram بالشكل {center,nodes:[...],relations:[...]} فقط عندما توجد علاقة مفاهيم حقيقية. لا تخترع علاقات غير موجودة في المصدر. الهدف أن تظهر المعلومة تدريجيًا مع الصوت: لا تعرض كل شيء من البداية. ' +
-          'في المشاهد العملية أو المسائل استخدم solution_steps عند توفر حل واضح، بالشكل [{step,why,calculation}]، بحيث يظهر الحل مرحلة مرحلة ويعرف الطالب لماذا انتقلنا لكل خطوة. لا تملأ هذا الحقل في المشاهد النظرية العادية. ' +
-          'لكل مشهد أضف source_anchor كعبارة قصيرة مأخوذة من المصدر تساعد على مراجعة أمانة المشهد، وأضف source_facts كأهم حقائق المصدر التي يعتمد عليها المشهد. إذا كان المشهد عمليًا أو يحتوي جدولًا/مسألة/أرقامًا وكان قائمًا على إحدى صور الصفحات المرفقة، أضف source_image_index كرقم الصورة من 0 إلى 11. لا تستخدم source_image_index إذا لم تكن الصورة مفيدة. في المشاهد العملية اعتمد على الصورة والبيانات الأصلية ولا تخترع أرقامًا. لا تستخدم source_anchor أو source_facts لاختراع معلومات جديدة. ' +
-          'دقة الرسم البصري إلزامية: لا تنشئ مخطط أسهم أو خريطة مفاهيم إلا إذا كانت العلاقات والاتجاهات مذكورة صراحة في المصدر؛ لا تستنتج علاقة من مجرد وجود المصطلحات معًا. إذا لم تكن العلاقات واضحة فاستخدم card أو steps بدل flow/concept_map. لا تنشئ رسومات أو جداول أو أرقامًا توضيحية من عندك. عند استخدام صورة مصدر، يجب أن تكون الصفحة التي تحتوي المعلومة نفسها، ولا تربط مشهدًا بصورة غير مرتبطة. راجع كل عنوان ونقطة وسهم ورقم مع المصدر قبل إخراج JSON. ' +
-          'بعد إنشاء المشاهد راجعها مقابل المصدر: التعريفات والقوائم والأرقام والقوانين يجب ألا تُختصر بطريقة تغيّر المعنى. إذا لم تجد سندًا واضحًا لمعلومة، احذفها. ' +
-          'كل مشهد يجب أن يحتوي kind من القيم: theory أو definition أو list أو formula أو example أو table أو summary. حقل bullets يحتوي 2 إلى 6 نقاط دقيقة من المصدر. حقل table اختياري، وشكله {headers:[...],rows:[[...],[...]]}، ولا تستخدمه إلا عند وجود جدول/مقارنة فعلية في المصدر. ' +
-          'ممنوع markdown داخل الحقول. أرجع JSON صالح فقط بهذا الشكل: ' +
-          '{"title":"...","language":"ar","brain":{"topic":"...","sections":["..."],"definitions":[],"lists":[],"formulas":[],"examples":[],"tables":[],"warnings":[]},"scenes":[{"title":"...","on_screen":"...","bullets":["..."],"narration":"...","duration":8,"kind":"theory","visual_type":"card","visual_focus":"...","emphasis":["..."],"draw_steps":["..."],"solution_steps":[{"step":"...","why":"...","calculation":"..."}],"calc_steps":[{"label":"...","formula":"...","numbers":"...","result":"..."}],"problem":{"statement":"...","tables":[{"title":"...","headers":["..."],"rows":[["..."]]}],"answers":[{"label":"...","formula":"...","numbers":"...","result":"..."}]},"diagram":{"center":"...","nodes":["..."],"relations":["..."]},"example":false,"source_anchor":"...","source_facts":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}. ' +
+          'أنت أستاذ جامعي عربي مصري الأسلوب تسجّل حصة بالفيديو على سبورة بنفس تصميم ملفات JustM المرتبة: عناوين، صناديق تعريف ملوّنة، نقاط مرقّمة بشرح، جداول، قوانين، وخطوات حل. ' +
+          'القاعدة الذهبية: لو الطالب شغّل الفيديو بدون صوت لازم يفهم المحاضرة كلها من المكتوب على السبورة. فاكتب على السبورة المعلومة نفسها كاملة (التعريف بنصه، كل نقطة بعنوان وشرح، الأرقام، القوانين، الجداول)، لا عنوانها أو كلمة واحدة عنها. أما صوتك (حقول say) فيشرح ويضيف الأسباب والتشبيهات والأمثلة فوق المكتوب ولا يكرره حرفيًا. ' +
+          'ممنوع التلخيص: لا تُسقط تعريفًا ولا نقطة ولا قانونًا ولا رقمًا ولا خطوة من المصدر، ولا تخترع معلومة أو رقمًا ليس في المصدر، وحافظ على مصطلحات الملف وترتيبه. إن كان شيء غير واضح في المصدر فقل ذلك بدل التخمين. ' +
+          'شكل الإخراج: JSON فيه title (عنوان الشرح) وscenes. كل مشهد = قسم أو فكرة من المحاضرة، وفيه section_label ("أولاً" ثم "ثانياً" ثم "ثالثاً"...) وtitle (اسم القسم كما في الملف) وboard: من 3 إلى 6 لوحات بترتيب تدريس المدرّس، تُكتب على الشاشة لوحة لوحة بينما يشرح. ' +
+          countRule + ' ' + lenRule + ' ' + focusRule +
+          'أنواع اللوحات (type): definition (تعريف)، info (معلومة)، warning (تنبيه أو عيوب أو أخطاء شائعة)، example (مثال أو فوائد أو نتائج)، note (ملاحظة)، summary (أهداف أو استخدامات أو خلاصة)، question (نص مسألة)، steps (خطوات حل)، flow (مخطط خطوات أو مراحل بأسهم من 3 إلى 6 عقد)، formula (قانون)، table (جدول)، fill (جدول ناقص يُكمَّل خلية خلية). نوّع اللوحات ولا تكرر نفس النوع في كل المشهد. ' +
+          'كل لوحة: title عنوان قصير يتضمن العدد إن وُجد (مثل: استخدامات جداول الحياة (3 استخدامات))، وicon رمز تعبيري واحد مناسب، وbadge اختياري ("مهم" أو "مهم جداً" أو "مهم للامتحان") لما يتوقع أن يأتي في الامتحان، وsay (إجباري) ما يقوله المدرّس عند ظهور اللوحة من 30 إلى 80 كلمة. ' +
+          'لأنواع الصناديق (definition وinfo وwarning وexample وnote وsummary وquestion وsteps وflow): التعريف يُكتب كاملًا في text مع الكلمة المهمة بين [[ ]]، ومعه items لو فيه نقاط. كل item فيه icon (رمز تعبيري)، وlabel (عنوان النقطة من 2 إلى 8 كلمات)، وtext (شرح من سطر أو سطرين من المصدر — إجباري ولا يُترك فارغًا إلا في steps وflow)، وsay (إجباري: ما يقوله المدرّس عن النقطة من 25 إلى 70 كلمة، يزيد على المكتوب ولا يكرره). حتى 7 نقاط في اللوحة. ' +
+          'الجداول: table {headers,rows} حتى 10 صفوف و5 أعمدة (العمود الأول اسم العنصر، ضع [[ ]] على خلية أو اثنتين مهمتين) مع say2 (إجباري) يشرح الجدول صفًا صفًا من 50 إلى 130 كلمة. القانون: formula بنص القانون ومعه title باسمه، ثم لوحة table تشرح كل رمز. ' +
+          'جدول يطلب المصدر إكماله أو يُحسب خانة خانة (مثل جدول الحياة): استخدم type="fill" مع fill: headers، وrows_before الجدول كما أُعطي والمجهول فيه "....", وrows_final الجدول بعد الإكمال كاملًا (حتى 12 صفًا)، وsteps لكل عمود مجهول {col رقم العمود من 0, label, formula, cells: معادلات رقمية لكل صف بنفس الترتيب مثل 76291 = 76718 − 427، وتُترك الخانة المعطاة أصلًا فارغة}، وsay يقدّم الجدول وsay2 يشرح ترتيب الإكمال. ' +
+          'المسائل الحسابية بترتيب ملفات JustM: (1) question نص المسألة بالمعطيات والمطلوب، (2) table جدول المعطيات، (3) formula القانون، (4) steps خطوات الحل: كل item فيه label اسم ما نحسبه، وeq المعادلة بالأرقام فقط (أرقام ورموز + − × ÷ = بدون حروف عربية، مثل 2,000 = 1,000 + 1,000)، وsay تشرح بتفصيل، (5) table جدول النتيجة والقرار النهائي. لو المصدر يعرض الحل فقط فأعد بناء السؤال والمعطيات من أرقام الحل كأنك المدرّس دون أي رقم غير موجود في المصدر. راجع كل عملية حسابية مرتين وصحّح أي رقم لا يطابق المصدر. ' +
+          'يجوز في بداية قسم كبير مشهد قصير فيه لوحة flow تعرض المراحل بأسهم، وبعده مشاهد تكتب مضمون كل مرحلة. ' +
+          'التظليل [[ ]] يُستعمل فقط في text وفي خلايا الجداول، ومن 1 إلى 3 مرات في اللوحة، ولا يوضع في say ولا في eq ولا في العناوين. لا تستخدم markdown ولا HTML. ' +
+          'إن كانت الصفحة المصدر مرفقة كصورة وفيها جدول أو مسألة فضع source_image_index (رقم الصورة من 0) في المشهد. ' +
           'الموضوع: ' + subject + '\n' +
-          modeRules + partRule + styleRules + 'النمط وطلب الطالب: ' + effectiveRequest + '\n\n' +
+          'طلب الطالب: ' + effectiveRequest + '\n\n' +
           'مادة المحاضرة كما استُخرجت من الملف:\n' + text;
 
         const parts = [{ text: prompt }];
@@ -1071,7 +1130,7 @@ export default {
           result = await callGemini(env, parts, {
             maxOutputTokens: 48000,
             responseMimeType: 'application/json',
-            responseSchema: VIDEO_SCRIPT_RESPONSE_SCHEMA,
+            responseSchema: BOARD_SCRIPT_SCHEMA,
             temperature: 0.2
           });
         } catch (firstErr) {
@@ -1079,14 +1138,14 @@ export default {
           // from turning into a useless 502. The retry explicitly asks for fewer,
           // denser scenes while preserving all source facts.
           if (firstErr && firstErr.status === 502) {
-            const retryParts = [{ text: prompt + '\n\nإعادة محاولة تقنية: أخرج JSON صالحًا بالكامل. لا تكتب أي نص خارج JSON. اجعل عدد المشاهد 8-18 فقط، واجعل كل مشهد مركزًا لكن لا تحذف التعريفات أو القوائم أو القوانين أو خطوات الحل. إذا لم توجد أمثلة أو جداول في المصدر فلا تضفها.' }];
+            const retryParts = [{ text: prompt + '\n\nإعادة محاولة تقنية: أخرج JSON صالحًا بالكامل. لا تكتب أي نص خارج JSON. التزم بصيغة board لكل مشهد (3 إلى 4 لوحات كحد أقصى في هذه المحاولة) واكتب say لكل لوحة ولكل نقطة بإيجاز، ولا تحذف التعريفات أو القوائم أو القوانين أو خطوات الحل. إذا لم توجد أمثلة أو جداول في المصدر فلا تضفها.' }];
             for (const img of images) {
               if (img && img.mimeType && img.data) retryParts.push({ inlineData: { mimeType: String(img.mimeType), data: String(img.data) } });
             }
             result = await callGemini(env, retryParts, {
               maxOutputTokens: 24000,
               responseMimeType: 'application/json',
-              responseSchema: VIDEO_SCRIPT_RESPONSE_SCHEMA,
+              responseSchema: BOARD_SCRIPT_SCHEMA,
               temperature: 0.1
             });
           } else {
@@ -1177,7 +1236,8 @@ export default {
           }
           // ---- teacher-board scenes: sanitise the blocks and BUILD the narration from their "say" parts so the
           // spoken beats always match the on-screen events one to one (block start, then each item / table window) ----
-          const BOARD_BOX = ['definition', 'info', 'warning', 'example', 'note', 'summary', 'question', 'steps'];
+          const BOARD_BOX = ['definition', 'info', 'warning', 'example', 'note', 'summary', 'question', 'steps', 'flow'];
+          const bico = (v) => { const t = String(v == null ? '' : v).replace(/[\u0000-\u001f<>*#`\[\]]/g, '').trim(); const a = Array.from(t).slice(0, 3).join(''); return /[A-Za-z0-9\u0600-\u06FF]/.test(a) ? '' : a; };
           const bk = (v, n) => String(v == null ? '' : v).replace(/¶/g, ' ').replace(/\[\[|\]\]/g, '').replace(/\*\*/g, '').replace(/[#`<>]/g, '').trim().slice(0, n || 600);
           const bkh = (v, n) => String(v == null ? '' : v).replace(/\*\*/g, '').replace(/[#`<>]/g, '').trim().slice(0, n || 600);
           const grid = (g, maxR, maxC) => (Array.isArray(g) ? g : []).slice(0, maxR).map((r) => (Array.isArray(r) ? r.slice(0, maxC).map((c) => bkh(c, 200)) : [])).filter((r) => r.length);
@@ -1188,7 +1248,7 @@ export default {
             board = x.board.slice(0, 8).map((b0) => {
               b0 = b0 && typeof b0 === 'object' ? b0 : {};
               let type = String(b0.type || 'info').toLowerCase();
-              const blk = { type, title: bkh(b0.title, 160), badge: /جد/.test(String(b0.badge || '')) ? 'مهم جداً' : (/امتحان/.test(String(b0.badge || '')) ? 'مهم للامتحان' : (/مهم/.test(String(b0.badge || '')) ? 'مهم' : '')) };
+              const blk = { type, ...(bico(b0.icon) ? { icon: bico(b0.icon) } : {}), title: bkh(b0.title, 160), badge: /جد/.test(String(b0.badge || '')) ? 'مهم جداً' : (/امتحان/.test(String(b0.badge || '')) ? 'مهم للامتحان' : (/مهم/.test(String(b0.badge || '')) ? 'مهم' : '')) };
               const say = bk(b0.say, 900);
               if (b0.text) blk.text = bkh(b0.text, 700);
               if (type === 'formula') {
@@ -1220,7 +1280,7 @@ export default {
                 blk.items = (Array.isArray(b0.items) ? b0.items : []).slice(0, 8).map((it) => {
                   it = it && typeof it === 'object' ? it : { label: String(it || '') };
                   const eq = bk(it.eq, 140);
-                  return { label: bkh(it.label, 120), text: bkh(it.text, 400), ...(eq ? { eq } : {}), say: bk(it.say, 700) };
+                  return { ...(bico(it.icon) ? { icon: bico(it.icon) } : {}), label: bkh(it.label, 120), text: bkh(it.text, 400), ...(eq ? { eq } : {}), say: bk(it.say, 700) };
                 }).filter((it) => it.label || it.text || it.eq);
               }
               // beats: block start, then (items | table window)
@@ -1305,32 +1365,25 @@ export default {
         if (!env.GEMINI_API_KEY) return jsonResponse({ error: 'GEMINI_API_KEY غير مضبوط في Worker' }, 503);
 
         const ttsUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent';
-        const ttsRes = await fetch(ttsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': env.GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            contents: [{
-              role: 'user',
-              parts: [{
-                text: narration,
-                speech_metadata: { style }
-              }]
-            }],
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: { voice }
-              }
-            }
-          })
+        const ttsBody = JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: narration, speech_metadata: { style } }] }],
+          generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { voice } } }
         });
-
+        let ttsRes = null;
+        for (let ta = 0; ta < 3; ta++) {
+          try {
+            ttsRes = await fetch(ttsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body: ttsBody });
+          } catch (_) { ttsRes = null; }
+          if (ttsRes && ttsRes.ok) break;
+          const stt = ttsRes ? ttsRes.status : 0;
+          if (ttsRes && ![429, 500, 502, 503, 504, 524].includes(stt)) break;
+          if (ta < 2) { try { if (ttsRes) await ttsRes.text(); } catch (_) {} await new Promise((r) => setTimeout(r, ta === 0 ? 1500 : 4000)); }
+        }
+        if (!ttsRes) return jsonResponse({ error: 'تعذر الاتصال بخدمة الصوت مؤقتًا. اضغط «استكمال» بعد قليل.' }, 503);
         if (!ttsRes.ok) {
           const detail = (await ttsRes.text()).slice(0, 800);
-          return jsonResponse({ error: 'تعذر إنشاء الصوت العربي' + (detail ? ': ' + detail : '') }, 502);
+          await recordAiHealth(env, false, ttsRes.status, detail);
+          return jsonResponse({ error: 'تعذر إنشاء الصوت العربي' + (detail ? ': ' + detail : '') }, [429, 500, 502, 503, 504, 524].includes(ttsRes.status) ? 503 : 502);
         }
 
         const ttsData = await ttsRes.json();
